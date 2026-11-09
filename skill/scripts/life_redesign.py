@@ -124,6 +124,10 @@ GOAL_SECTIONS = (
     ("Month Project", "month_project"),
     ("Constraints", "constraints"),
 )
+# Sections a goals version can hold. Daily Levers is written only by `plan`
+# (no append flag) but `append` must carry it forward too.
+ALL_GOAL_SECTIONS = GOAL_SECTIONS + (("Daily Levers", "daily_levers"),)
+REASON_RE = re.compile(r"^_Reason: (.*)_$")
 # Verbs and flags that ask to rewrite or remove existing content. They are not
 # part of the command surface; they are recognised only to be rejected loudly.
 FORBIDDEN_WORDS = {
@@ -136,7 +140,8 @@ SECTION_RE = re.compile(r"^### (.+?)[ \t]*$")
 
 
 def reject_destructive(argv):
-    value_flags = {"--text", "--year-goal", "--month-project", "--constraints"}
+    value_flags = {"--text", "--year-goal", "--month-project", "--constraints",
+                   "--why"}
     checked = []
     skip = False
     for i, tok in enumerate(argv):
@@ -166,7 +171,16 @@ def parse_versions(text):
             versions[-1]["lines"].append(line)
     out = []
     for v in versions:
-        out.append({"date": v["date"], "content": "\n".join(v["lines"]).strip()})
+        content = "\n".join(v["lines"]).strip()
+        item = {"date": v["date"]}
+        # A trailing `_Reason: ..._` line is a plan-change reason, not content.
+        head, _, last = content.rpartition("\n")
+        m = REASON_RE.match(last.strip())
+        if m:
+            content = head.strip()
+            item["reason"] = m.group(1)
+        item["content"] = content
+        out.append(item)
     return out
 
 
@@ -224,7 +238,7 @@ def cmd_append(args):
         merged = dict(versions[-1]["sections"]) if versions else {}
         merged.update(given)
         body = "\n\n".join("### %s\n%s" % (t, merged[t])
-                           for t, _ in GOAL_SECTIONS if t in merged)
+                           for t, _ in ALL_GOAL_SECTIONS if t in merged)
     else:
         for _, attr in GOAL_SECTIONS:
             if getattr(args, attr) is not None:
@@ -251,6 +265,54 @@ def cmd_show(args):
     emit({"target": args.target,
           "current": versions[-1] if versions else None,
           "versions": versions})
+
+
+# ---- plan: change vision / anti-vision / goals sections (PROTOCOL.md s.6) ----
+# object -> (append target, goals section title or None)
+PLAN_OBJECTS = {
+    "vision": ("vision", None),
+    "anti-vision": ("anti-vision", None),
+    "year-goal": ("goals", "Year Goal"),
+    "month-project": ("goals", "Month Project"),
+    "daily-levers": ("goals", "Daily Levers"),
+    "constraints": ("goals", "Constraints"),
+}
+
+
+def cmd_plan_change(args):
+    state = load_state()
+    require_active(state)
+    target, section = PLAN_OBJECTS[args.object]
+    why = " ".join((args.why or "").split())
+    if not why:
+        raise CliError("--why is required: say why this is changing")
+    if args.text is None:
+        raise CliError("--text is required")
+    text = check_body(args.text, "--text", r"^#{1,3} " if section else r"^## ")
+    versions = read_versions(target)
+    current = versions[-1] if versions else None
+    if section:
+        merged = dict(current["sections"]) if current else {}
+        old = merged.get(section)
+        merged[section] = text
+        body = "\n\n".join("### %s\n%s" % (t, merged[t])
+                           for t, _ in ALL_GOAL_SECTIONS if t in merged)
+    else:
+        old = current["content"] if current else None
+        body = text
+    path = os.path.join(data_dir(), APPEND_TARGETS[target])
+    existing = ""
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            existing = f.read()
+    date = now().date().isoformat()
+    entry = "## %s\n%s\n_Reason: %s_\n" % (date, body, why)
+    if existing.strip():
+        entry = ("\n" if existing.endswith("\n") else "\n\n") + entry
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(entry)
+    emit({"object": args.object, "date": date, "old": old, "new": text,
+          "why": why, "versions": len(read_versions(target))})
 
 
 # ---- one-day protocol: progress and resume (PROTOCOL.md section 4) ----------
@@ -497,6 +559,14 @@ def main(argv=None):
     p = sub.add_parser("show", help="show all versions; current is the last")
     p.add_argument("target", choices=sorted(APPEND_TARGETS))
     p.set_defaults(func=cmd_show)
+    p = sub.add_parser("plan", help="change vision/goals/levers/constraints with a reason")
+    plsub = p.add_subparsers(dest="plan_command")
+    plsub.required = True
+    q = plsub.add_parser("change")
+    q.add_argument("object", choices=sorted(PLAN_OBJECTS))
+    q.add_argument("--text")
+    q.add_argument("--why")
+    q.set_defaults(func=cmd_plan_change)
     p = sub.add_parser("protocol", help="one-day protocol progress and resume")
     psub = p.add_subparsers(dest="protocol_command")
     psub.required = True

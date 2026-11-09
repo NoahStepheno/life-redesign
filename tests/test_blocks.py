@@ -3,7 +3,7 @@ import os
 import subprocess
 import sys
 
-from tests.helpers import CLI, CliResult, CliTestCase
+from tests.helpers import ActiveCliTestCase, CLI, CliResult, CliTestCase
 
 
 def block(file, mode, body):
@@ -22,7 +22,7 @@ class SnapshotTest(CliTestCase):
         self.assertIsNone(out["anti_vision"])
         self.assertEqual(out["goals"], {})
         self.assertEqual(out["verdicts"], [])
-        self.assertEqual(out["streak"], {"drift": 0, "unrecorded": 0})
+        self.assertEqual(out["streak"], {"drift": 0, "unrecorded": 0, "escalation": False})
 
     def test_snapshot_uses_current_versions_and_last_7_days(self):
         self.run_cli("append", "vision", "--text", "old v")
@@ -44,7 +44,7 @@ class SnapshotTest(CliTestCase):
         self.assertEqual(out["verdicts"], [
             {"date": "2026-01-26", "verdict": "在轨"},
             {"date": "2026-02-01", "verdict": "轻微偏离"}])
-        self.assertEqual(out["streak"], {"drift": 2, "unrecorded": 1})
+        self.assertEqual(out["streak"], {"drift": 2, "unrecorded": 1, "escalation": False})
 
 
 class ApplyBlockTest(CliTestCase):
@@ -148,3 +148,28 @@ class ApplyBlockTest(CliTestCase):
         r = self.run_cli("apply-block", "--file", p)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.read_data("log", "x.md"), "hi\n")
+
+
+class SnapshotRealDataTest(ActiveCliTestCase):
+    def checkin(self, day, verdict):
+        self.set_now("2026-01-%02dT21:00:00" % day)
+        r = self.run_cli(
+            "checkin", "record", "--lever", "写作", "--levers-done", "写了",
+            "--action-drift", "no", "--action-reason", "无",
+            "--identity-protection", "yes", "--identity-reason", "无",
+            "--toward", "vision", "--toward-reason", "写了",
+            "--verdict", verdict, "--verdict-reason", "理由",
+            "--tomorrow-lever", "写作")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_snapshot_reflects_checkins_and_unrecorded_days(self):
+        self.set_now("2026-01-15T09:00:00")
+        self.checkin(15, "走偏")
+        self.checkin(16, "走偏")
+        self.set_now("2026-01-19T09:00:00")  # 17 and 18 missed
+        out = self.run_cli("snapshot").json()
+        self.assertEqual(out["verdicts"], [
+            {"date": "2026-01-15", "verdict": "走偏"},
+            {"date": "2026-01-16", "verdict": "走偏"}])
+        self.assertEqual(out["streak"]["drift"], 2)
+        self.assertEqual(out["streak"]["unrecorded"], 2)

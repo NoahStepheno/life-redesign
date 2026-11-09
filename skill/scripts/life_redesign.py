@@ -10,8 +10,14 @@ import copy
 import datetime
 import json
 import os
+import plistlib
+import random
 import re
+import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 
 INITIAL_STATE = {
     "phase": "new",
@@ -124,6 +130,10 @@ GOAL_SECTIONS = (
     ("Month Project", "month_project"),
     ("Constraints", "constraints"),
 )
+# Sections a goals version can hold. Daily Levers is written only by `plan`
+# (no append flag) but `append` must carry it forward too.
+ALL_GOAL_SECTIONS = GOAL_SECTIONS + (("Daily Levers", "daily_levers"),)
+REASON_RE = re.compile(r"^_Reason: (.*)_$")
 # Verbs and flags that ask to rewrite or remove existing content. They are not
 # part of the command surface; they are recognised only to be rejected loudly.
 FORBIDDEN_WORDS = {
@@ -136,7 +146,8 @@ SECTION_RE = re.compile(r"^### (.+?)[ \t]*$")
 
 
 def reject_destructive(argv):
-    value_flags = {"--text", "--year-goal", "--month-project", "--constraints"}
+    value_flags = {"--text", "--year-goal", "--month-project", "--constraints",
+                   "--why"}
     checked = []
     skip = False
     for i, tok in enumerate(argv):
@@ -166,7 +177,16 @@ def parse_versions(text):
             versions[-1]["lines"].append(line)
     out = []
     for v in versions:
-        out.append({"date": v["date"], "content": "\n".join(v["lines"]).strip()})
+        content = "\n".join(v["lines"]).strip()
+        item = {"date": v["date"]}
+        # A trailing `_Reason: ..._` line is a plan-change reason, not content.
+        head, _, last = content.rpartition("\n")
+        m = REASON_RE.match(last.strip())
+        if m:
+            content = head.strip()
+            item["reason"] = m.group(1)
+        item["content"] = content
+        out.append(item)
     return out
 
 
@@ -252,7 +272,7 @@ def goals_body(given):
     merged = dict(versions[-1]["sections"]) if versions else {}
     merged.update(given)
     return "\n\n".join("### %s\n%s" % (t, merged[t])
-                       for t, _ in GOAL_SECTIONS if t in merged)
+                       for t, _ in ALL_GOAL_SECTIONS if t in merged)
 
 
 def cmd_show(args):
@@ -268,8 +288,6 @@ BLOCK_START = "=== LIFE-REDESIGN UPDATE ==="
 BLOCK_END = "=== END ==="
 BLOCK_MODES = ("create", "append")
 LOG_PATH_RE = re.compile(r"^(log|protocol)/[^/]+\.md$")
-VERDICT_RE = re.compile(r"^- 判定[:：]\s*(.+?)\s*$", re.M)
-LOG_NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.md$")
 
 
 def current_text(target):
@@ -278,31 +296,17 @@ def current_text(target):
 
 
 def recent_verdicts(days=7):
-    log_dir = os.path.join(data_dir(), "log")
-    if not os.path.isdir(log_dir):
-        return []
     today = now().date()
-    first = today - datetime.timedelta(days=days - 1)
-    out = []
-    for name in sorted(os.listdir(log_dir)):
-        m = LOG_NAME_RE.match(name)
-        if not m:
-            continue
-        try:
-            d = datetime.datetime.strptime(m.group(1), "%Y-%m-%d").date()
-        except ValueError:
-            continue
-        if not first <= d <= today:
-            continue
-        with open(os.path.join(log_dir, name), encoding="utf-8") as f:
-            found = VERDICT_RE.findall(f.read())
-        if found:
-            out.append({"date": m.group(1), "verdict": found[-1]})
-    return out
+    first = (today - datetime.timedelta(days=days - 1)).isoformat()
+    return [{"date": d, "verdict": v} for d, v in log_verdicts()
+            if v is not None and first <= d <= today.isoformat()]
 
 
 def cmd_snapshot(args):
     state = load_state()
+    if state.get("streak_cursor") is not None:
+        # Same as `streak status`: finalize missed days so counters are current.
+        state = backfill_unrecorded(state)
     goals = read_versions("goals")
     streak = state.get("streak") or {}
     emit({
@@ -312,7 +316,8 @@ def cmd_snapshot(args):
         "goals": dict(goals[-1]["sections"]) if goals else {},
         "verdicts": recent_verdicts(),
         "streak": {"drift": streak.get("drift", 0),
-                   "unrecorded": streak.get("unrecorded", 0)},
+                   "unrecorded": streak.get("unrecorded", 0),
+                   "escalation": bool(state.get("escalation"))},
     })
 
 
@@ -404,13 +409,13 @@ def validate_block(b, seen):
             m = SECTION_RE.match(line)
             if m:
                 name = m.group(1)
-                if name not in dict(GOAL_SECTIONS):
+                if name not in dict(ALL_GOAL_SECTIONS):
                     raise CliError("block %d: unknown goals section %r" % (n, name))
                 sections[name] = []
             elif name is None:
                 if line.strip():
                     raise CliError("block %d: goals content must be under a "
-                                   "'### Year Goal|Month Project|Constraints' section" % n)
+                                   "'### Year Goal|Month Project|Daily Levers|Constraints' section" % n)
             else:
                 sections[name].append(line)
         if not sections:
@@ -457,6 +462,866 @@ def cmd_apply_block(args):
             with open(full, "a", encoding="utf-8") as f:
                 f.write(sep + item["body"] + "\n")
     emit({"applied": [{"file": b["file"], "mode": b["mode"]} for b in blocks]})
+# ---- plan: change vision / anti-vision / goals sections (PROTOCOL.md s.6) ----
+# object -> (append target, goals section title or None)
+PLAN_OBJECTS = {
+    "vision": ("vision", None),
+    "anti-vision": ("anti-vision", None),
+    "year-goal": ("goals", "Year Goal"),
+    "month-project": ("goals", "Month Project"),
+    "daily-levers": ("goals", "Daily Levers"),
+    "constraints": ("goals", "Constraints"),
+}
+
+
+def cmd_plan_change(args):
+    state = load_state()
+    require_active(state)
+    target, section = PLAN_OBJECTS[args.object]
+    why = " ".join((args.why or "").split())
+    if not why:
+        raise CliError("--why is required: say why this is changing")
+    if args.text is None:
+        raise CliError("--text is required")
+    text = check_body(args.text, "--text", r"^#{1,3} " if section else r"^## ")
+    versions = read_versions(target)
+    current = versions[-1] if versions else None
+    if section:
+        merged = dict(current["sections"]) if current else {}
+        old = merged.get(section)
+        merged[section] = text
+        body = "\n\n".join("### %s\n%s" % (t, merged[t])
+                           for t, _ in ALL_GOAL_SECTIONS if t in merged)
+    else:
+        old = current["content"] if current else None
+        body = text
+    path = os.path.join(data_dir(), APPEND_TARGETS[target])
+    existing = ""
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            existing = f.read()
+    date = now().date().isoformat()
+    entry = "## %s\n%s\n_Reason: %s_\n" % (date, body, why)
+    if existing.strip():
+        entry = ("\n" if existing.endswith("\n") else "\n\n") + entry
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(entry)
+    emit({"object": args.object, "date": date, "old": old, "new": text,
+          "why": why, "versions": len(read_versions(target))})
+
+
+# ---- one-day protocol: progress and resume (PROTOCOL.md section 4) ----------
+# Question ids follow PROTOCOL.md numbering. Part 2 interrupts are not
+# answered through this path: they are timed pushes, not sequential gates.
+QUESTIONS = (["1.%d" % i for i in range(1, 15)]
+             + ["3.%d" % i for i in range(1, 8)] + ["3.constraints"])
+SHELVE_AFTER = datetime.timedelta(days=7)
+
+
+def question_part(qid):
+    return int(qid.split(".")[0])
+
+
+def parse_ts(raw):
+    return datetime.datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S")
+
+
+def protocol_dir():
+    return os.path.join(data_dir(), "protocol")
+
+
+def empty_protocol():
+    return {"started_at": None, "part": None, "question": None,
+            "last_activity": None, "files": [], "redo": False}
+
+
+def proto_of(state):
+    p = state.setdefault("protocol", {})
+    for k, v in empty_protocol().items():
+        p.setdefault(k, v)
+    return p
+
+
+def move_marked(state, marker):
+    """Rename the current segment's files to <name>.<marker>.md (never delete)."""
+    p = proto_of(state)
+    for name in p["files"]:
+        src = os.path.join(protocol_dir(), name)
+        if not os.path.isfile(src):
+            continue
+        stem = name[:-3]
+        n = 1
+        dst = "%s.%s.md" % (stem, marker)
+        while os.path.exists(os.path.join(protocol_dir(), dst)):
+            n += 1
+            dst = "%s.%s.%d.md" % (stem, marker, n)
+        os.rename(src, os.path.join(protocol_dir(), dst))
+    p["files"] = []
+
+
+def begin_segment(state):
+    p = proto_of(state)
+    t = now().isoformat()
+    p.update({"started_at": t, "last_activity": t, "files": [],
+              "part": 1, "question": QUESTIONS[0]})
+
+
+def in_flight(state):
+    """A segment is running: first run in progress, or a redo over active."""
+    return state["phase"] == "protocol_in_progress" or (
+        state["phase"] == "active" and proto_of(state)["redo"])
+
+
+def feeling_check_required(state):
+    p = proto_of(state)
+    return (in_flight(state) and p["question"] != QUESTIONS[0]
+            and p["last_activity"] is not None
+            and parse_ts(p["last_activity"]).date() < now().date())
+
+
+def refresh(state):
+    """Apply the 7-day shelving rule lazily; persists when it changes state."""
+    p = proto_of(state)
+    if in_flight(state) and p["last_activity"] is not None \
+            and now() - parse_ts(p["last_activity"]) > SHELVE_AFTER:
+        move_marked(state, "archived")
+        was_redo = p["redo"]
+        state["protocol"] = empty_protocol()
+        if not was_redo:
+            state["phase"] = "protocol_shelved"
+        save_state(state)
+    return state
+
+
+def require_active(state=None):
+    """Gate for checkin/review/plan: return state, or refuse unless phase is active."""
+    if state is None:
+        state = load_state()
+    state = refresh(state)
+    if state["phase"] != "active":
+        raise CliError(
+            "the protocol is not complete (phase: %s): finish the protocol first "
+            "(`protocol resume`, then answer every question)" % state["phase"])
+    return state
+
+
+def protocol_report(state):
+    p = proto_of(state)
+    q = p["question"]
+    return {
+        "phase": state["phase"],
+        "redo": p["redo"],
+        "part": p["part"],
+        "question": q,
+        "answered": QUESTIONS.index(q) if q in QUESTIONS else
+        (len(QUESTIONS) if state["phase"] == "active" and not p["redo"] else 0),
+        "total": len(QUESTIONS),
+        "feeling_check_required": feeling_check_required(state),
+    }
+
+
+def cmd_protocol_status(args):
+    emit(protocol_report(refresh(load_state())))
+
+
+def cmd_protocol_gate(args):
+    require_active()
+    emit({"active": True})
+
+
+def cmd_protocol_resume(args):
+    state = refresh(load_state())
+    if state["phase"] == "active" and not proto_of(state)["redo"]:
+        raise CliError("protocol already complete; use `protocol redo` to redo it explicitly")
+    if state["phase"] in ("new", "protocol_shelved"):
+        state["phase"] = "protocol_in_progress"
+        begin_segment(state)
+        save_state(state)
+    emit(protocol_report(state))
+
+
+def cmd_protocol_confirm(args):
+    state = refresh(load_state())
+    if not feeling_check_required(state):
+        raise CliError("no feeling check pending")
+    p = proto_of(state)
+    if args.feeling == "fresh":
+        p["last_activity"] = now().isoformat()
+    else:
+        move_marked(state, "discarded")
+        begin_segment(state)
+    save_state(state)
+    emit(protocol_report(state))
+
+
+def cmd_protocol_redo(args):
+    state = refresh(load_state())
+    if state["phase"] != "active":
+        raise CliError("redo needs a completed protocol (phase active); use `protocol resume`")
+    if proto_of(state)["redo"]:
+        raise CliError("a redo is already in progress; use `protocol resume`")
+    begin_segment(state)
+    proto_of(state)["redo"] = True
+    save_state(state)
+    emit(protocol_report(state))
+
+
+def segment_file(state):
+    p = proto_of(state)
+    today = now().date().isoformat()
+    for name in p["files"]:
+        if name.startswith(today):
+            return name
+    n = 1
+    name = today + ".md"
+    while os.path.exists(os.path.join(protocol_dir(), name)):
+        n += 1
+        name = "%s.%d.md" % (today, n)
+    p["files"].append(name)
+    return name
+
+
+def cmd_protocol_answer(args):
+    state = refresh(load_state())
+    p = proto_of(state)
+    qid = args.question_id
+    if qid not in QUESTIONS:
+        raise CliError("unknown question id %r (valid: %s)" % (qid, ", ".join(QUESTIONS)))
+    if state["phase"] == "active" and not p["redo"]:
+        raise CliError("protocol already complete; use `protocol redo` to redo it explicitly")
+    if not in_flight(state):
+        raise CliError("protocol not started: run `protocol resume` first")
+    if feeling_check_required(state):
+        raise CliError("overnight return: run `protocol confirm-feeling fresh|faded` first")
+    if qid != p["question"]:
+        raise CliError("answer questions in order: current question is %s" % p["question"])
+    if args.text is None:
+        raise CliError("--text is required")
+    body = check_body(args.text, "--text", r"^## ")
+    name = segment_file(state)
+    os.makedirs(protocol_dir(), exist_ok=True)
+    path = os.path.join(protocol_dir(), name)
+    existing = ""
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            existing = f.read()
+    entry = "## %s\n%s\n" % (qid, body)
+    if existing.strip():
+        entry = ("\n" if existing.endswith("\n") else "\n\n") + entry
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(entry)
+        f.flush()
+        os.fsync(f.fileno())
+    i = QUESTIONS.index(qid)
+    p["last_activity"] = now().isoformat()
+    if i + 1 < len(QUESTIONS):
+        p["question"] = QUESTIONS[i + 1]
+        p["part"] = question_part(p["question"])
+    else:
+        p["question"] = None
+        p["part"] = None
+        p["redo"] = False
+        state["phase"] = "active"
+        # the completion day is the baseline: it can never become Unrecorded
+        state.setdefault("streak_cursor", now().date().isoformat())
+    save_state(state)
+    emit({"answered": qid, "next": p["question"], "file": name,
+          "phase": state["phase"]})
+
+
+# ---- daily check-in and verdicts (PROTOCOL.md section 5.1, 5.3) --------------
+# Self-contained section. Log: log/YYYY-MM-DD.md, append-only (ADR-0001).
+# Tomorrow's levers: levers.jsonl, one appended line per check-in; the last
+# line for a date wins. Streaks/escalation are not handled here.
+VERDICTS = ("在轨", "轻微偏离", "走偏")
+VERDICT_RE = re.compile(r"^- 判定: (.+?)[ \t]*$")
+REVISION_RE = re.compile(r"^- 改判: .+? → (.+?) — 因 ")
+
+
+def log_path(date):
+    return os.path.join(data_dir(), "log", date + ".md")
+
+
+def levers_path():
+    return os.path.join(data_dir(), "levers.jsonl")
+
+
+def saved_levers(date):
+    path = levers_path()
+    found = []
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    rec = json.loads(line)
+                    if rec["date"] == date:
+                        found = rec["levers"]
+    return found
+
+
+def one_line(value, label):
+    value = (value or "").strip()
+    if not value:
+        raise CliError("%s is required and must not be empty" % label)
+    if "\n" in value:
+        raise CliError("%s must be a single line" % label)
+    return value
+
+
+def current_verdict(text):
+    verdict = None
+    for line in text.split("\n"):
+        m = VERDICT_RE.match(line) or REVISION_RE.match(line)
+        if m:
+            verdict = m.group(1)
+    return verdict
+
+
+def append_log(date, block):
+    path = log_path(date)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    existing = ""
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            existing = f.read()
+    if existing:
+        block = ("\n" if existing.endswith("\n") else "\n\n") + block
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(block)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def yes_no(value):
+    return "是" if value == "yes" else "否"
+
+
+def check_verdict(value):
+    verdict = one_line(value, "--verdict")
+    if verdict not in VERDICTS:
+        raise CliError("--verdict must be one of: %s" % " / ".join(VERDICTS))
+    return verdict
+
+
+def cmd_checkin_record(args):
+    state = backfill_unrecorded(require_active())
+    away = None
+    if state["streak"]["unrecorded"] > 0 or args.while_away is not None:
+        away = (args.while_away or "").strip()
+        if not away and state["streak"]["unrecorded"] > 0:
+            raise CliError(
+                "you were silent: first say what happened in the missing days "
+                "(--while-away \"...\") before checking in")
+    t = now()
+    date = t.date().isoformat()
+    verdict = check_verdict(args.verdict)
+    verdict_reason = one_line(args.verdict_reason, "--verdict-reason")
+    levers = [one_line(x, "--lever") for x in (args.lever or [])]
+    if not levers:
+        levers = saved_levers(date)
+    if not levers:
+        raise CliError("--lever is required (no levers saved for today)")
+    tomorrow = [one_line(x, "--tomorrow-lever") for x in (args.tomorrow_lever or [])]
+    if not tomorrow:
+        raise CliError("--tomorrow-lever is required (set tomorrow's Daily Levers)")
+    done = one_line(args.levers_done, "--levers-done")
+    action_reason = one_line(args.action_reason, "--action-reason")
+    identity_reason = one_line(args.identity_reason, "--identity-reason")
+    toward_reason = one_line(args.toward_reason, "--toward-reason")
+    lines = [
+        "- Daily Levers: %s" % "; ".join(levers),
+        "- 完成情况: %s" % done,
+        "- 行动偏离: %s — %s" % (yes_no(args.action_drift), action_reason),
+        "- 身份保护: %s — %s" % (yes_no(args.identity_protection), identity_reason),
+        "- 靠近反愿景: %s — %s" % (
+            "靠近反愿景" if args.toward == "anti-vision" else "靠近愿景", toward_reason),
+        "- 判定: %s" % verdict,
+        "- 判定理由: %s" % verdict_reason,
+    ]
+    if away:
+        lines.append("- 这几天发生了什么: %s" % one_line(away, "--while-away"))
+    path = log_path(date)
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        head = "## %s 再次打卡" % t.strftime("%H:%M:%S")
+    else:
+        head = "# %s" % date
+    append_log(date, head + "\n" + "\n".join(lines) + "\n")
+    state["streak"]["unrecorded"] = 0
+    recompute_drift(state)
+    save_state(state)
+    tomorrow_date = (t.date() + datetime.timedelta(days=1)).isoformat()
+    with open(levers_path(), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"date": tomorrow_date, "levers": tomorrow,
+                            "set_at": t.isoformat()}, ensure_ascii=False) + "\n")
+    emit({"date": date, "file": "log/%s.md" % date, "verdict": verdict,
+          "tomorrow_date": tomorrow_date, "tomorrow_levers": tomorrow})
+
+
+def cmd_checkin_revise(args):
+    state = backfill_unrecorded(require_active())
+    t = now()
+    date = t.date().isoformat()
+    fact = one_line(args.new_fact, "--new-fact (a new fact is required to revise a verdict)")
+    verdict = check_verdict(args.verdict)
+    path = log_path(date)
+    previous = None
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            previous = current_verdict(f.read())
+    if previous is None:
+        raise CliError("no check-in recorded today: nothing to revise")
+    append_log(date, "- 改判: %s → %s — 因 %s 事实改判 (%s)\n"
+               % (previous, verdict, fact, t.strftime("%H:%M:%S")))
+    recompute_drift(state)
+    save_state(state)
+    emit({"date": date, "previous": previous, "verdict": verdict,
+          "streak": streak_view(state)})
+
+
+def cmd_checkin_levers(args):
+    load_state()
+    date = args.date or now().date().isoformat()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise CliError("--date must be YYYY-MM-DD")
+    emit({"date": date, "levers": saved_levers(date)})
+
+
+# ---- streaks, Unrecorded back-fill, escalation, DND (PROTOCOL.md section 5.2) --
+# state.streak_cursor = last day already finalized (set when the protocol
+# completes). Each interaction back-fills the days after the cursor and before
+# today: a non-DND day with no check-in log gets an appended "- 未记录" log
+# (ADR-0001: appended, existing logs untouched) and unrecorded += 1. Drift is
+# recomputed from the logs (see recompute_drift), never touched by Unrecorded.
+ESCALATION_AT = 3
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+UNRECORDED_LINE = "- 未记录"
+
+
+def check_date(value):
+    value = (value or "").strip()
+    try:
+        if not DATE_RE.match(value):
+            raise ValueError(value)
+        datetime.datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise CliError("date must be YYYY-MM-DD")
+    return value
+
+
+def log_verdicts():
+    """Sorted [(date, current verdict or None)] over all daily logs."""
+    folder = os.path.join(data_dir(), "log")
+    out = []
+    if os.path.isdir(folder):
+        for name in sorted(os.listdir(folder)):
+            if re.match(r"^\d{4}-\d{2}-\d{2}\.md$", name):
+                with open(os.path.join(folder, name), encoding="utf-8") as f:
+                    out.append((name[:-3], current_verdict(f.read())))
+    return out
+
+
+def recompute_drift(state):
+    """Consecutive trailing 走偏 days; Unrecorded and DND days are skipped
+    (they neither count nor break the run); any other verdict resets to 0."""
+    drift = 0
+    for _date, verdict in log_verdicts():
+        if verdict is None:
+            continue
+        drift = drift + 1 if verdict == "走偏" else 0
+    state["streak"]["drift"] = drift
+    update_escalation(state)
+
+
+def update_escalation(state):
+    st = state["streak"]
+    state["escalation"] = (st["drift"] >= ESCALATION_AT
+                           or st["unrecorded"] >= ESCALATION_AT)
+
+
+def backfill_unrecorded(state):
+    today = now().date()
+    cursor = state.get("streak_cursor")
+    if cursor is None:
+        return state
+    day = datetime.datetime.strptime(cursor, "%Y-%m-%d").date() + datetime.timedelta(days=1)
+    while day < today:
+        d = day.isoformat()
+        has_checkin = os.path.isfile(log_path(d)) and any(
+            v is not None for dd, v in log_verdicts() if dd == d)
+        if d not in state["dnd_dates"] and not has_checkin:
+            append_log(d, "# %s\n%s\n" % (d, UNRECORDED_LINE))
+            state["streak"]["unrecorded"] += 1
+        day += datetime.timedelta(days=1)
+    state["streak_cursor"] = max(
+        cursor, (today - datetime.timedelta(days=1)).isoformat())
+    update_escalation(state)
+    save_state(state)
+    return state
+
+
+def streak_view(state):
+    st = state["streak"]
+    return {"drift": st["drift"], "unrecorded": st["unrecorded"],
+            "escalation": bool(state.get("escalation")),
+            "threshold": ESCALATION_AT, "dnd_dates": state["dnd_dates"]}
+
+
+def cmd_streak_status(args):
+    state = backfill_unrecorded(require_active())
+    emit(streak_view(state))
+
+
+def cmd_dnd(args):
+    state = load_state()
+    dates = state["dnd_dates"]
+    if args.dnd_command in ("add", "remove"):
+        d = check_date(args.date)
+        if args.dnd_command == "add" and d not in dates:
+            dates.append(d)
+            dates.sort()
+        if args.dnd_command == "remove" and d in dates:
+            dates.remove(d)
+        save_state(state)
+    emit({"dnd_dates": dates})
+
+
+# ---- notify: push scheduling, text, launchd (PROTOCOL.md section 8) ----------
+# The plan is a pure function of (date, config, state): the random push is
+# drawn from random.Random("life-redesign-notify:" + date), so the same date
+# always gives the same plan. Text is pre-written only; user text (Year Goal,
+# Daily Levers) appears only when notify.show_user_text is on (default off).
+SLOTS = ("morning", "random", "evening")
+SILENCE_AT = 3
+TICK_SECONDS = 900
+LAUNCHD_PREFIX = "com.life-redesign.notify."
+TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+NOTIFY_TITLE = "Life Redesign"
+MORNING_DEFAULT_TEXT = "打开查看今日杠杆"
+EVENING_TEXT = "该打卡了:花几分钟记录今天。"
+# Pre-written pool: the six interrupt questions (PROTOCOL.md 4.2) plus the
+# three alternates.
+INTERRUPT_QUESTIONS = [
+    "我现在做的事,是在逃避什么?",
+    "如果有人把我过去两小时拍下来,会得出我想要什么样的人生?",
+    "我正在走向我讨厌的生活,还是我想要的生活?",
+    "我正假装不重要的、最重要的事是什么?",
+    "今天有哪些事是出于身份保护,而不是真实欲望?",
+    "今天我什么时候感到最有活力?什么时候最麻木?",
+    "如果我不再需要别人把我看作那个身份,会有什么不同?",
+    "我生活中哪里在用\"活力\"换\"安全\"?",
+    "明天我能成为的、想成为的那个人的最小版本是什么?",
+]
+READ_ONLY_CLAUDE_FLAGS = ["--tools", "",
+                          "--disallowedTools",
+                          "Bash,Edit,Write,MultiEdit,NotebookEdit"]
+
+
+def notify_config(state):
+    cfg = state.setdefault("notify", {})
+    cfg.setdefault("client", "claude -p")
+    times = cfg.setdefault("times", {})
+    times.setdefault("morning", "08:30")
+    times.setdefault("evening", "21:30")
+    times.setdefault("random_window", ["11:00", "17:00"])
+    cfg.setdefault("show_user_text", False)
+    cfg.setdefault("ai", False)
+    return cfg
+
+
+def check_hhmm(value, label):
+    if not TIME_RE.match(value or ""):
+        raise CliError("%s must be HH:MM (24h)" % label)
+    return value
+
+
+def to_minutes(hhmm):
+    return int(hhmm[:2]) * 60 + int(hhmm[3:])
+
+
+def fmt_minutes(m):
+    return "%02d:%02d" % (m // 60, m % 60)
+
+
+def on_off(value):
+    if value not in ("on", "off"):
+        raise CliError("expected on or off")
+    return value == "on"
+
+
+def cmd_notify_config(args):
+    state = load_state()
+    cfg = notify_config(state)
+    times = cfg["times"]
+    if args.show_user_text is not None:
+        cfg["show_user_text"] = on_off(args.show_user_text)
+    if args.ai is not None:
+        cfg["ai"] = on_off(args.ai)
+    if args.morning is not None:
+        times["morning"] = check_hhmm(args.morning, "--morning")
+    if args.evening is not None:
+        times["evening"] = check_hhmm(args.evening, "--evening")
+    if args.window is not None:
+        start = check_hhmm(args.window[0], "--window start")
+        end = check_hhmm(args.window[1], "--window end")
+        if to_minutes(start) >= to_minutes(end):
+            raise CliError("--window start must be before end")
+        times["random_window"] = [start, end]
+    if args.client is not None:
+        if not args.client.strip():
+            raise CliError("--client must not be empty")
+        cfg["client"] = args.client
+    save_state(state)
+    emit({"notify": cfg})
+
+
+def goals_section(name):
+    versions = read_versions("goals")
+    if not versions:
+        return ""
+    return versions[-1].get("sections", {}).get(name, "")
+
+
+def day_levers(date):
+    levers = saved_levers(date)
+    if levers:
+        return list(levers)
+    text = goals_section("Daily Levers")
+    return [ln.strip().lstrip("-*0123456789. ").strip()
+            for ln in text.split("\n") if ln.strip()]
+
+
+def push_text(slot, date, state, question):
+    cfg = notify_config(state)
+    if slot == "morning":
+        if not cfg["show_user_text"]:
+            return MORNING_DEFAULT_TEXT
+        parts = []
+        levers = day_levers(date)
+        if levers:
+            parts.append("今日杠杆: " + "; ".join(levers))
+        goal = " ".join(goals_section("Year Goal").split())
+        if goal:
+            parts.append("Year Goal: " + goal)
+        return " | ".join(parts) or MORNING_DEFAULT_TEXT
+    if slot == "random":
+        return question
+    return EVENING_TEXT
+
+
+def build_plan(state, date):
+    """The day's pushes, without text. Empty for DND days / inactive phase."""
+    cfg = notify_config(state)
+    if state["phase"] != "active":
+        return [], "protocol not complete"
+    if date in state["dnd_dates"]:
+        return [], "do-not-disturb date"
+    times = cfg["times"]
+    evening = {"slot": "evening", "time": times["evening"]}
+    if state["streak"]["unrecorded"] >= SILENCE_AT:
+        return [evening], "silence: unrecorded streak"
+    rng = random.Random("life-redesign-notify:" + date)
+    lo, hi = (to_minutes(t) for t in times["random_window"])
+    rnd = {"slot": "random", "time": fmt_minutes(rng.randint(lo, hi)),
+           "question": rng.choice(INTERRUPT_QUESTIONS)}
+    pushes = [{"slot": "morning", "time": times["morning"]}, rnd, evening]
+    pushes.sort(key=lambda p: p["time"])
+    return pushes, None
+
+
+def notify_state():
+    state = refresh(load_state())
+    if state["phase"] == "active":
+        state = backfill_unrecorded(state)
+    return state
+
+
+def cmd_notify_plan(args):
+    state = notify_state()
+    date = check_date(args.date) if args.date else now().date().isoformat()
+    pushes, why = build_plan(state, date)
+    for p in pushes:
+        p["text"] = push_text(p["slot"], date, state, p.get("question"))
+    out = {"date": date, "pushes": pushes}
+    if why:
+        out["reason"] = why
+    emit(out)
+
+
+def recent_logs(date, days=7):
+    """Text of the logs for `date` and the 6 days before it (7 days max)."""
+    end = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+    chunks = []
+    for back in range(days - 1, -1, -1):
+        d = (end - datetime.timedelta(days=back)).isoformat()
+        if os.path.isfile(log_path(d)):
+            with open(log_path(d), encoding="utf-8") as f:
+                chunks.append(f.read().strip())
+    return "\n\n".join(chunks)
+
+
+def ai_prompt(state, date):
+    st = state["streak"]
+    return (
+        "你是一个只读的提醒助手。下面是用户最近 7 天的日志和 streak "
+        "(drift=%d, unrecorded=%d)。请只输出一句中文打卡提醒(不超过 40 字)。"
+        "不要给出判定(Verdict),不要引用日志原文。\n\n---日志---\n%s\n"
+        % (st["drift"], st["unrecorded"], recent_logs(date)))
+
+
+def client_command(client, prompt):
+    """Headless client invocation, restricted to read-only.
+
+    Enforcement: (1) this CLI reads at most the last 7 days of logs and
+    inlines them in the prompt, so the client needs no file access at all;
+    (2) for `claude` every tool is disabled (`--tools ""`) and file-writing /
+    shell tools are explicitly disallowed; (3) the client runs in an empty
+    temp cwd with stdin closed. Other clients are run as configured with the
+    same prompt and must be read-only by their own configuration.
+    """
+    argv = shlex.split(client)
+    if not argv:
+        raise CliError("notify.client is empty")
+    cmd = argv + [prompt]
+    if os.path.basename(argv[0]) == "claude":
+        cmd += READ_ONLY_CLAUDE_FLAGS
+    return cmd
+
+
+def run_client(cmd):
+    """One-line text from the client, or None when unavailable/failed."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="life-redesign-ai-") as cwd:
+            done = subprocess.run(
+                cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, universal_newlines=True, timeout=30)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return " ".join(done.stdout.split())[:120] or None
+
+
+def display_command(title, text):
+    tn = shutil.which("terminal-notifier")
+    if tn:
+        return [tn, "-title", title, "-message", text]
+    script = "display notification %s with title %s" % (
+        json.dumps(text, ensure_ascii=False), json.dumps(title, ensure_ascii=False))
+    return ["osascript", "-e", script]
+
+
+def cmd_notify_fire(args):
+    state = notify_state()
+    now_dt = now()
+    date = now_dt.date().isoformat()
+    pushes, why = build_plan(state, date)
+    entry = next((p for p in pushes if p["slot"] == args.slot), None)
+    result = {"slot": args.slot, "date": date, "dry_run": bool(args.dry_run),
+              "fired": False}
+    if entry is None:
+        result["skipped"] = why or "not in today's plan"
+        emit(result)
+        return
+    if args.tick:
+        at = datetime.datetime.strptime(
+            date + " " + entry["time"], "%Y-%m-%d %H:%M")
+        if not (0 <= (now_dt - at).total_seconds() < TICK_SECONDS):
+            result["skipped"] = "not due yet"
+            emit(result)
+            return
+    cfg = notify_config(state)
+    text = push_text(args.slot, date, state, entry.get("question"))
+    source = "template"
+    # AI only for the evening reminder, and only when notify.ai is on.
+    if args.slot == "evening" and cfg["ai"]:
+        prompt = ai_prompt(state, date)
+        cmd = client_command(cfg["client"], prompt)
+        result["client_command"] = ["<prompt>" if c == prompt else c for c in cmd]
+        ai_text = run_client(cmd)
+        if ai_text:
+            text, source = ai_text, "ai"
+    cmd = display_command(NOTIFY_TITLE, text)
+    result.update({"title": NOTIFY_TITLE, "text": text, "source": source,
+                   "display_command": cmd})
+    if not args.dry_run:
+        try:
+            subprocess.run(cmd, stdin=subprocess.DEVNULL, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            result["fired"] = True
+        except (OSError, subprocess.SubprocessError):
+            result["error"] = "display command failed"
+    emit(result)
+
+
+def launchd_dir():
+    return os.path.join(os.path.expanduser("~"), "Library", "LaunchAgents")
+
+
+def launchd_jobs(state):
+    times = notify_config(state)["times"]
+    script = os.path.abspath(__file__)
+    jobs = []
+    for slot in SLOTS:
+        argv = [sys.executable, script, "notify", "fire", slot]
+        job = {"Label": LAUNCHD_PREFIX + slot,
+               "EnvironmentVariables": {"LIFE_REDESIGN_HOME": data_dir()},
+               "RunAtLoad": False}
+        if slot == "random":
+            # launchd cannot fire at a random time: tick through the day and
+            # let `fire --tick` decide whether the planned minute is due.
+            job["ProgramArguments"] = argv + ["--tick"]
+            job["StartInterval"] = TICK_SECONDS
+        else:
+            hh, mm = times[slot].split(":")
+            job["ProgramArguments"] = argv
+            job["StartCalendarInterval"] = {"Hour": int(hh), "Minute": int(mm)}
+        path = os.path.join(launchd_dir(), job["Label"] + ".plist")
+        jobs.append({"label": job["Label"], "path": path, "job": job})
+    return jobs
+
+
+def cmd_notify_launchd(args):
+    state = load_state()
+    action = args.notify_command
+    jobs = launchd_jobs(state)
+    domain = "gui/%d" % os.getuid()
+    cmds = []
+    for j in jobs:
+        if action == "install":
+            cmds.append(["launchctl", "bootstrap", domain, j["path"]])
+        else:
+            cmds.append(["launchctl", "bootout", domain + "/" + j["label"]])
+    if action == "install":
+        shown = [{"label": j["label"], "path": j["path"],
+                  "plist": plistlib.dumps(j["job"]).decode("utf-8")}
+                 for j in jobs]
+    else:
+        shown = [{"label": j["label"], "path": j["path"]} for j in jobs]
+    out = {"dry_run": bool(args.dry_run), "jobs": shown, "commands": cmds}
+    if action == "uninstall":
+        out["remove_files"] = [j["path"] for j in jobs]
+    if args.dry_run:
+        emit(out)
+        return
+    if sys.platform != "darwin":
+        raise CliError("launchd install/uninstall is macOS only")
+    if action == "install":
+        os.makedirs(launchd_dir(), exist_ok=True)
+        for j in jobs:
+            if os.path.isfile(j["path"]):  # re-install: unload the old job first
+                subprocess.run(["launchctl", "bootout", domain + "/" + j["label"]],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+            with open(j["path"], "wb") as f:
+                f.write(plistlib.dumps(j["job"]))
+    for c in cmds:
+        subprocess.run(c, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    if action == "uninstall":
+        for j in jobs:
+            if os.path.isfile(j["path"]):
+                os.remove(j["path"])
+    emit(out)
 
 
 def main(argv=None):
@@ -490,6 +1355,87 @@ def main(argv=None):
     p = sub.add_parser("apply-block", help="apply update block(s) from stdin or --file (create/append only)")
     p.add_argument("--file")
     p.set_defaults(func=cmd_apply_block)
+    p = sub.add_parser("plan", help="change vision/goals/levers/constraints with a reason")
+    plsub = p.add_subparsers(dest="plan_command")
+    plsub.required = True
+    q = plsub.add_parser("change")
+    q.add_argument("object", choices=sorted(PLAN_OBJECTS))
+    q.add_argument("--text")
+    q.add_argument("--why")
+    q.set_defaults(func=cmd_plan_change)
+    p = sub.add_parser("protocol", help="one-day protocol progress and resume")
+    psub = p.add_subparsers(dest="protocol_command")
+    psub.required = True
+    psub.add_parser("status").set_defaults(func=cmd_protocol_status)
+    psub.add_parser("resume").set_defaults(func=cmd_protocol_resume)
+    psub.add_parser("redo").set_defaults(func=cmd_protocol_redo)
+    psub.add_parser("gate").set_defaults(func=cmd_protocol_gate)
+    q = psub.add_parser("answer")
+    q.add_argument("question_id")
+    q.add_argument("--text")
+    q.set_defaults(func=cmd_protocol_answer)
+    q = psub.add_parser("confirm-feeling")
+    q.add_argument("feeling", choices=["fresh", "faded"])
+    q.set_defaults(func=cmd_protocol_confirm)
+    p = sub.add_parser("checkin", help="nightly check-in, verdict revision, levers")
+    csub = p.add_subparsers(dest="checkin_command")
+    csub.required = True
+    q = csub.add_parser("record")
+    q.add_argument("--lever", action="append")
+    q.add_argument("--levers-done")
+    q.add_argument("--action-drift", choices=["yes", "no"], required=True)
+    q.add_argument("--action-reason")
+    q.add_argument("--identity-protection", choices=["yes", "no"], required=True)
+    q.add_argument("--identity-reason")
+    q.add_argument("--toward", choices=["anti-vision", "vision"], required=True)
+    q.add_argument("--toward-reason")
+    q.add_argument("--verdict")
+    q.add_argument("--verdict-reason")
+    q.add_argument("--tomorrow-lever", action="append")
+    q.add_argument("--while-away", dest="while_away")
+    q.set_defaults(func=cmd_checkin_record)
+    q = csub.add_parser("revise-verdict")
+    q.add_argument("--new-fact")
+    q.add_argument("--verdict")
+    q.set_defaults(func=cmd_checkin_revise)
+    q = csub.add_parser("levers")
+    q.add_argument("--date")
+    q.set_defaults(func=cmd_checkin_levers)
+    p = sub.add_parser("streak", help="drift/unrecorded counters and escalation flag")
+    ssub = p.add_subparsers(dest="streak_command")
+    ssub.required = True
+    ssub.add_parser("status").set_defaults(func=cmd_streak_status)
+    p = sub.add_parser("dnd", help="manage do-not-disturb dates")
+    dsub = p.add_subparsers(dest="dnd_command")
+    dsub.required = True
+    dsub.add_parser("list")
+    for name in ("add", "remove"):
+        q = dsub.add_parser(name)
+        q.add_argument("date")
+    p.set_defaults(func=cmd_dnd)
+    p = sub.add_parser("notify", help="push schedule, text and launchd install")
+    nsub = p.add_subparsers(dest="notify_command")
+    nsub.required = True
+    q = nsub.add_parser("config")
+    q.add_argument("--show-user-text")
+    q.add_argument("--ai")
+    q.add_argument("--morning")
+    q.add_argument("--evening")
+    q.add_argument("--window", nargs=2, metavar=("START", "END"))
+    q.add_argument("--client")
+    q.set_defaults(func=cmd_notify_config)
+    q = nsub.add_parser("plan")
+    q.add_argument("--date")
+    q.set_defaults(func=cmd_notify_plan)
+    q = nsub.add_parser("fire")
+    q.add_argument("slot", choices=SLOTS)
+    q.add_argument("--dry-run", action="store_true")
+    q.add_argument("--tick", action="store_true")
+    q.set_defaults(func=cmd_notify_fire)
+    for name in ("install", "uninstall"):
+        q = nsub.add_parser(name)
+        q.add_argument("--dry-run", action="store_true")
+        q.set_defaults(func=cmd_notify_launchd)
     args = parser.parse_args(argv)
     try:
         args.func(args)

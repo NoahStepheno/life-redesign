@@ -85,3 +85,20 @@ class CliTestCase(unittest.TestCase):
 
     def read_state(self):
         return json.loads(self.read_data("state.json"))
+
+
+ALL_QUESTIONS = (["1.%d" % i for i in range(1, 15)]
+                 + ["3.%d" % i for i in range(1, 8)] + ["3.constraints"])
+
+
+class ActiveCliTestCase(CliTestCase):
+    """CliTestCase with an initialised data dir and a completed protocol."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_cli("init")
+        self.run_cli("protocol", "resume")
+        for qid in ALL_QUESTIONS:
+            r = self.run_cli("protocol", "answer", qid, "--text", "a " + qid)
+            assert r.returncode == 0, r.stderr
+        assert self.read_state()["phase"] == "active"

@@ -1172,8 +1172,8 @@ TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 NOTIFY_TITLE = "Life Redesign"
 MORNING_DEFAULT_TEXT = "打开查看今日杠杆"
 EVENING_TEXT = "该打卡了:花几分钟记录今天。"
-# Pre-written pool: the six interrupt questions (PROTOCOL.md 4.2) plus the
-# three alternates.
+# Pre-written random-push pool: exactly the six interrupt questions
+# (PROTOCOL.md 4.2).
 INTERRUPT_QUESTIONS = [
     "我现在做的事,是在逃避什么?",
     "如果有人把我过去两小时拍下来,会得出我想要什么样的人生?",
@@ -1181,6 +1181,10 @@ INTERRUPT_QUESTIONS = [
     "我正假装不重要的、最重要的事是什么?",
     "今天有哪些事是出于身份保护,而不是真实欲望?",
     "今天我什么时候感到最有活力?什么时候最麻木?",
+]
+# Alternates: kept as data, deliberately NOT in the random pool (PROTOCOL 8.1
+# draws one of the six interrupt questions only).
+ALTERNATE_QUESTIONS = [
     "如果我不再需要别人把我看作那个身份,会有什么不同?",
     "我生活中哪里在用\"活力\"换\"安全\"?",
     "明天我能成为的、想成为的那个人的最小版本是什么?",

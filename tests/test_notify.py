@@ -64,6 +64,24 @@ class PlanTest(NotifyTestCase):
         q = self.plan("2026-01-16")["pushes"][1]["text"]
         self.assertTrue(q.endswith("?") or q.endswith("?") or "?" in q)
 
+    def test_random_question_drawn_only_from_the_six_interrupts(self):
+        six = {
+            "我现在做的事,是在逃避什么?",
+            "如果有人把我过去两小时拍下来,会得出我想要什么样的人生?",
+            "我正在走向我讨厌的生活,还是我想要的生活?",
+            "我正假装不重要的、最重要的事是什么?",
+            "今天有哪些事是出于身份保护,而不是真实欲望?",
+            "今天我什么时候感到最有活力?什么时候最麻木?",
+        }
+        seen = set()
+        for d in range(16, 32):
+            seen.add(self.plan("2026-01-%02d" % d)["pushes"][1]["text"])
+        for m in range(1, 5):
+            for d in range(1, 29):
+                seen.add(self.plan("2026-%02d-%02d" % (m + 1, d))["pushes"][1]["text"])
+        self.assertTrue(seen <= six, seen - six)
+        self.assertGreater(len(seen), 3)
+
     def test_silence_after_three_unrecorded(self):
         self.checkin(15)
         self.set_now("2026-01-19T08:00:00")  # 16,17,18 unrecorded

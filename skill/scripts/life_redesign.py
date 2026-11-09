@@ -176,8 +176,11 @@ def reject_destructive(argv):
             raise CliError(
                 "%r is not supported: records are append-only (ADR-0001). "
                 "Use `append` to add a new dated version; old versions are "
-                "never overwritten or deleted. Archive by renaming the file "
-                "by hand." % tok)
+                "never overwritten or deleted. The CLI never deletes anything: "
+                "it only marks (renames) one-day-protocol segments, when a "
+                "protocol is shelved or a feeling is confirmed faded. "
+                "Archiving the whole data directory is done by hand."
+                % tok)
 
 
 def parse_versions(text):

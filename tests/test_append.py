@@ -114,6 +114,14 @@ class AppendOnlyTest(CliTestCase):
                     "delete", "remove", "rm", "reset", "archive"):
             self.assertRejected(cmd, "vision", "--text", "evil")
 
+    def test_rejection_message_explains_what_the_cli_does_and_leaves_to_user(self):
+        r = self.run_cli("delete", "vision")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("never deletes", r.stderr)
+        self.assertIn("renam", r.stderr)  # marks/renames protocol segments
+        self.assertIn("whole data directory", r.stderr)
+        self.assertIn("by hand", r.stderr)
+
     def test_forbidden_words_as_content_are_fine(self):
         r = self.run_cli("append", "vision", "--text", "delete")
         self.assertEqual(r.returncode, 0, r.stderr)

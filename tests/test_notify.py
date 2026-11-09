@@ -213,6 +213,21 @@ class FireTest(NotifyTestCase):
         self.assertIn("Write", cmd[cmd.index("--disallowedTools") + 1])
         self.assertIn("Bash", cmd[cmd.index("--disallowedTools") + 1])
 
+    def test_malformed_client_rejected_at_config_time(self):
+        r = self.run_cli("notify", "config", "--client", 'claude -p "')
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("--client", r.stderr)
+
+    def test_malformed_client_already_in_state_falls_back_at_fire(self):
+        self.run_cli("notify", "config", "--ai", "on")
+        state = self.read_state()
+        state["notify"]["client"] = 'claude -p "'
+        import json
+        self.write_data(json.dumps(state), "state.json")
+        out = self.evening()
+        self.assertEqual(out["source"], "template")
+
     def test_failing_client_falls_back_to_template(self):
         client = self.fake_client("exit 3")
         self.run_cli("notify", "config", "--client", client, "--ai", "on")

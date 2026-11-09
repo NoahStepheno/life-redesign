@@ -1247,6 +1247,10 @@ def cmd_notify_config(args):
     if args.client is not None:
         if not args.client.strip():
             raise CliError("--client must not be empty")
+        try:
+            shlex.split(args.client)
+        except ValueError as e:
+            raise CliError("--client is not a valid command line (%s)" % e)
         cfg["client"] = args.client
     save_state(state)
     emit({"notify": cfg})
@@ -1416,11 +1420,15 @@ def cmd_notify_fire(args):
     # AI only for the evening reminder, and only when notify.ai is on.
     if args.slot == "evening" and cfg["ai"]:
         prompt = ai_prompt(state, date)
-        cmd = client_command(cfg["client"], prompt)
-        result["client_command"] = ["<prompt>" if c == prompt else c for c in cmd]
-        ai_text = run_client(cmd)
-        if ai_text:
-            text, source = ai_text, "ai"
+        try:
+            cmd = client_command(cfg["client"], prompt)
+        except (CliError, ValueError):
+            cmd = None  # unusable client config: keep the template text
+        if cmd:
+            result["client_command"] = ["<prompt>" if c == prompt else c for c in cmd]
+            ai_text = run_client(cmd)
+            if ai_text:
+                text, source = ai_text, "ai"
     cmd = display_command(NOTIFY_TITLE, text)
     result.update({"title": NOTIFY_TITLE, "text": text, "source": source,
                    "display_command": cmd})

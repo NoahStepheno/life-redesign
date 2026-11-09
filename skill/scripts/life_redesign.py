@@ -10,8 +10,14 @@ import copy
 import datetime
 import json
 import os
+import plistlib
+import random
 import re
+import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 
 INITIAL_STATE = {
     "phase": "new",
@@ -940,6 +946,345 @@ def cmd_review_save(args):
           "reviews": len(re.findall(r"(?m)^## ", existing + entry))})
 
 
+# ---- notify: push scheduling, text, launchd (PROTOCOL.md section 8) ----------
+# The plan is a pure function of (date, config, state): the random push is
+# drawn from random.Random("life-redesign-notify:" + date), so the same date
+# always gives the same plan. Text is pre-written only; user text (Year Goal,
+# Daily Levers) appears only when notify.show_user_text is on (default off).
+SLOTS = ("morning", "random", "evening")
+SILENCE_AT = 3
+TICK_SECONDS = 900
+LAUNCHD_PREFIX = "com.life-redesign.notify."
+TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+NOTIFY_TITLE = "Life Redesign"
+MORNING_DEFAULT_TEXT = "打开查看今日杠杆"
+EVENING_TEXT = "该打卡了:花几分钟记录今天。"
+# Pre-written pool: the six interrupt questions (PROTOCOL.md 4.2) plus the
+# three alternates.
+INTERRUPT_QUESTIONS = [
+    "我现在做的事,是在逃避什么?",
+    "如果有人把我过去两小时拍下来,会得出我想要什么样的人生?",
+    "我正在走向我讨厌的生活,还是我想要的生活?",
+    "我正假装不重要的、最重要的事是什么?",
+    "今天有哪些事是出于身份保护,而不是真实欲望?",
+    "今天我什么时候感到最有活力?什么时候最麻木?",
+    "如果我不再需要别人把我看作那个身份,会有什么不同?",
+    "我生活中哪里在用\"活力\"换\"安全\"?",
+    "明天我能成为的、想成为的那个人的最小版本是什么?",
+]
+READ_ONLY_CLAUDE_FLAGS = ["--tools", "",
+                          "--disallowedTools",
+                          "Bash,Edit,Write,MultiEdit,NotebookEdit"]
+
+
+def notify_config(state):
+    cfg = state.setdefault("notify", {})
+    cfg.setdefault("client", "claude -p")
+    times = cfg.setdefault("times", {})
+    times.setdefault("morning", "08:30")
+    times.setdefault("evening", "21:30")
+    times.setdefault("random_window", ["11:00", "17:00"])
+    cfg.setdefault("show_user_text", False)
+    cfg.setdefault("ai", False)
+    return cfg
+
+
+def check_hhmm(value, label):
+    if not TIME_RE.match(value or ""):
+        raise CliError("%s must be HH:MM (24h)" % label)
+    return value
+
+
+def to_minutes(hhmm):
+    return int(hhmm[:2]) * 60 + int(hhmm[3:])
+
+
+def fmt_minutes(m):
+    return "%02d:%02d" % (m // 60, m % 60)
+
+
+def on_off(value):
+    if value not in ("on", "off"):
+        raise CliError("expected on or off")
+    return value == "on"
+
+
+def cmd_notify_config(args):
+    state = load_state()
+    cfg = notify_config(state)
+    times = cfg["times"]
+    if args.show_user_text is not None:
+        cfg["show_user_text"] = on_off(args.show_user_text)
+    if args.ai is not None:
+        cfg["ai"] = on_off(args.ai)
+    if args.morning is not None:
+        times["morning"] = check_hhmm(args.morning, "--morning")
+    if args.evening is not None:
+        times["evening"] = check_hhmm(args.evening, "--evening")
+    if args.window is not None:
+        start = check_hhmm(args.window[0], "--window start")
+        end = check_hhmm(args.window[1], "--window end")
+        if to_minutes(start) >= to_minutes(end):
+            raise CliError("--window start must be before end")
+        times["random_window"] = [start, end]
+    if args.client is not None:
+        if not args.client.strip():
+            raise CliError("--client must not be empty")
+        cfg["client"] = args.client
+    save_state(state)
+    emit({"notify": cfg})
+
+
+def goals_section(name):
+    versions = read_versions("goals")
+    if not versions:
+        return ""
+    return versions[-1].get("sections", {}).get(name, "")
+
+
+def day_levers(date):
+    levers = saved_levers(date)
+    if levers:
+        return list(levers)
+    text = goals_section("Daily Levers")
+    return [ln.strip().lstrip("-*0123456789. ").strip()
+            for ln in text.split("\n") if ln.strip()]
+
+
+def push_text(slot, date, state, question):
+    cfg = notify_config(state)
+    if slot == "morning":
+        if not cfg["show_user_text"]:
+            return MORNING_DEFAULT_TEXT
+        parts = []
+        levers = day_levers(date)
+        if levers:
+            parts.append("今日杠杆: " + "; ".join(levers))
+        goal = " ".join(goals_section("Year Goal").split())
+        if goal:
+            parts.append("Year Goal: " + goal)
+        return " | ".join(parts) or MORNING_DEFAULT_TEXT
+    if slot == "random":
+        return question
+    return EVENING_TEXT
+
+
+def build_plan(state, date):
+    """The day's pushes, without text. Empty for DND days / inactive phase."""
+    cfg = notify_config(state)
+    if state["phase"] != "active":
+        return [], "protocol not complete"
+    if date in state["dnd_dates"]:
+        return [], "do-not-disturb date"
+    times = cfg["times"]
+    evening = {"slot": "evening", "time": times["evening"]}
+    if state["streak"]["unrecorded"] >= SILENCE_AT:
+        return [evening], "silence: unrecorded streak"
+    rng = random.Random("life-redesign-notify:" + date)
+    lo, hi = (to_minutes(t) for t in times["random_window"])
+    rnd = {"slot": "random", "time": fmt_minutes(rng.randint(lo, hi)),
+           "question": rng.choice(INTERRUPT_QUESTIONS)}
+    pushes = [{"slot": "morning", "time": times["morning"]}, rnd, evening]
+    pushes.sort(key=lambda p: p["time"])
+    return pushes, None
+
+
+def notify_state():
+    state = refresh(load_state())
+    if state["phase"] == "active":
+        state = backfill_unrecorded(state)
+    return state
+
+
+def cmd_notify_plan(args):
+    state = notify_state()
+    date = check_date(args.date) if args.date else now().date().isoformat()
+    pushes, why = build_plan(state, date)
+    for p in pushes:
+        p["text"] = push_text(p["slot"], date, state, p.get("question"))
+    out = {"date": date, "pushes": pushes}
+    if why:
+        out["reason"] = why
+    emit(out)
+
+
+def recent_logs(date, days=7):
+    """Text of the logs for `date` and the 6 days before it (7 days max)."""
+    end = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+    chunks = []
+    for back in range(days - 1, -1, -1):
+        d = (end - datetime.timedelta(days=back)).isoformat()
+        if os.path.isfile(log_path(d)):
+            with open(log_path(d), encoding="utf-8") as f:
+                chunks.append(f.read().strip())
+    return "\n\n".join(chunks)
+
+
+def ai_prompt(state, date):
+    st = state["streak"]
+    return (
+        "你是一个只读的提醒助手。下面是用户最近 7 天的日志和 streak "
+        "(drift=%d, unrecorded=%d)。请只输出一句中文打卡提醒(不超过 40 字)。"
+        "不要给出判定(Verdict),不要引用日志原文。\n\n---日志---\n%s\n"
+        % (st["drift"], st["unrecorded"], recent_logs(date)))
+
+
+def client_command(client, prompt):
+    """Headless client invocation, restricted to read-only.
+
+    Enforcement: (1) this CLI reads at most the last 7 days of logs and
+    inlines them in the prompt, so the client needs no file access at all;
+    (2) for `claude` every tool is disabled (`--tools ""`) and file-writing /
+    shell tools are explicitly disallowed; (3) the client runs in an empty
+    temp cwd with stdin closed. Other clients are run as configured with the
+    same prompt and must be read-only by their own configuration.
+    """
+    argv = shlex.split(client)
+    if not argv:
+        raise CliError("notify.client is empty")
+    cmd = argv + [prompt]
+    if os.path.basename(argv[0]) == "claude":
+        cmd += READ_ONLY_CLAUDE_FLAGS
+    return cmd
+
+
+def run_client(cmd):
+    """One-line text from the client, or None when unavailable/failed."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="life-redesign-ai-") as cwd:
+            done = subprocess.run(
+                cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, universal_newlines=True, timeout=30)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return " ".join(done.stdout.split())[:120] or None
+
+
+def display_command(title, text):
+    tn = shutil.which("terminal-notifier")
+    if tn:
+        return [tn, "-title", title, "-message", text]
+    script = "display notification %s with title %s" % (
+        json.dumps(text, ensure_ascii=False), json.dumps(title, ensure_ascii=False))
+    return ["osascript", "-e", script]
+
+
+def cmd_notify_fire(args):
+    state = notify_state()
+    now_dt = now()
+    date = now_dt.date().isoformat()
+    pushes, why = build_plan(state, date)
+    entry = next((p for p in pushes if p["slot"] == args.slot), None)
+    result = {"slot": args.slot, "date": date, "dry_run": bool(args.dry_run),
+              "fired": False}
+    if entry is None:
+        result["skipped"] = why or "not in today's plan"
+        emit(result)
+        return
+    if args.tick:
+        at = datetime.datetime.strptime(
+            date + " " + entry["time"], "%Y-%m-%d %H:%M")
+        if not (0 <= (now_dt - at).total_seconds() < TICK_SECONDS):
+            result["skipped"] = "not due yet"
+            emit(result)
+            return
+    cfg = notify_config(state)
+    text = push_text(args.slot, date, state, entry.get("question"))
+    source = "template"
+    # AI only for the evening reminder, and only when notify.ai is on.
+    if args.slot == "evening" and cfg["ai"]:
+        prompt = ai_prompt(state, date)
+        cmd = client_command(cfg["client"], prompt)
+        result["client_command"] = ["<prompt>" if c == prompt else c for c in cmd]
+        ai_text = run_client(cmd)
+        if ai_text:
+            text, source = ai_text, "ai"
+    cmd = display_command(NOTIFY_TITLE, text)
+    result.update({"title": NOTIFY_TITLE, "text": text, "source": source,
+                   "display_command": cmd})
+    if not args.dry_run:
+        try:
+            subprocess.run(cmd, stdin=subprocess.DEVNULL, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            result["fired"] = True
+        except (OSError, subprocess.SubprocessError):
+            result["error"] = "display command failed"
+    emit(result)
+
+
+def launchd_dir():
+    return os.path.join(os.path.expanduser("~"), "Library", "LaunchAgents")
+
+
+def launchd_jobs(state):
+    times = notify_config(state)["times"]
+    script = os.path.abspath(__file__)
+    jobs = []
+    for slot in SLOTS:
+        argv = [sys.executable, script, "notify", "fire", slot]
+        job = {"Label": LAUNCHD_PREFIX + slot,
+               "EnvironmentVariables": {"LIFE_REDESIGN_HOME": data_dir()},
+               "RunAtLoad": False}
+        if slot == "random":
+            # launchd cannot fire at a random time: tick through the day and
+            # let `fire --tick` decide whether the planned minute is due.
+            job["ProgramArguments"] = argv + ["--tick"]
+            job["StartInterval"] = TICK_SECONDS
+        else:
+            hh, mm = times[slot].split(":")
+            job["ProgramArguments"] = argv
+            job["StartCalendarInterval"] = {"Hour": int(hh), "Minute": int(mm)}
+        path = os.path.join(launchd_dir(), job["Label"] + ".plist")
+        jobs.append({"label": job["Label"], "path": path, "job": job})
+    return jobs
+
+
+def cmd_notify_launchd(args):
+    state = load_state()
+    action = args.notify_command
+    jobs = launchd_jobs(state)
+    domain = "gui/%d" % os.getuid()
+    cmds = []
+    for j in jobs:
+        if action == "install":
+            cmds.append(["launchctl", "bootstrap", domain, j["path"]])
+        else:
+            cmds.append(["launchctl", "bootout", domain + "/" + j["label"]])
+    if action == "install":
+        shown = [{"label": j["label"], "path": j["path"],
+                  "plist": plistlib.dumps(j["job"]).decode("utf-8")}
+                 for j in jobs]
+    else:
+        shown = [{"label": j["label"], "path": j["path"]} for j in jobs]
+    out = {"dry_run": bool(args.dry_run), "jobs": shown, "commands": cmds}
+    if action == "uninstall":
+        out["remove_files"] = [j["path"] for j in jobs]
+    if args.dry_run:
+        emit(out)
+        return
+    if sys.platform != "darwin":
+        raise CliError("launchd install/uninstall is macOS only")
+    if action == "install":
+        os.makedirs(launchd_dir(), exist_ok=True)
+        for j in jobs:
+            if os.path.isfile(j["path"]):  # re-install: unload the old job first
+                subprocess.run(["launchctl", "bootout", domain + "/" + j["label"]],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+            with open(j["path"], "wb") as f:
+                f.write(plistlib.dumps(j["job"]))
+    for c in cmds:
+        subprocess.run(c, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    if action == "uninstall":
+        for j in jobs:
+            if os.path.isfile(j["path"]):
+                os.remove(j["path"])
+    emit(out)
+
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
@@ -1039,6 +1384,29 @@ def main(argv=None):
     q.add_argument("--period")
     q.add_argument("--text")
     q.set_defaults(func=cmd_review_save)
+    p = sub.add_parser("notify", help="push schedule, text and launchd install")
+    nsub = p.add_subparsers(dest="notify_command")
+    nsub.required = True
+    q = nsub.add_parser("config")
+    q.add_argument("--show-user-text")
+    q.add_argument("--ai")
+    q.add_argument("--morning")
+    q.add_argument("--evening")
+    q.add_argument("--window", nargs=2, metavar=("START", "END"))
+    q.add_argument("--client")
+    q.set_defaults(func=cmd_notify_config)
+    q = nsub.add_parser("plan")
+    q.add_argument("--date")
+    q.set_defaults(func=cmd_notify_plan)
+    q = nsub.add_parser("fire")
+    q.add_argument("slot", choices=SLOTS)
+    q.add_argument("--dry-run", action="store_true")
+    q.add_argument("--tick", action="store_true")
+    q.set_defaults(func=cmd_notify_fire)
+    for name in ("install", "uninstall"):
+        q = nsub.add_parser(name)
+        q.add_argument("--dry-run", action="store_true")
+        q.set_defaults(func=cmd_notify_launchd)
     args = parser.parse_args(argv)
     try:
         args.func(args)

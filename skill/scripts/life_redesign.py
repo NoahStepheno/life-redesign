@@ -527,6 +527,8 @@ def cmd_protocol_answer(args):
         p["part"] = None
         p["redo"] = False
         state["phase"] = "active"
+        state.setdefault("streak_cursor",
+                         (now().date() - datetime.timedelta(days=1)).isoformat())
     save_state(state)
     emit({"answered": qid, "next": p["question"], "file": name,
           "phase": state["phase"]})
@@ -607,7 +609,14 @@ def check_verdict(value):
 
 
 def cmd_checkin_record(args):
-    require_active()
+    state = backfill_unrecorded(require_active())
+    away = None
+    if state["streak"]["unrecorded"] > 0 or args.while_away is not None:
+        away = (args.while_away or "").strip()
+        if not away and state["streak"]["unrecorded"] > 0:
+            raise CliError(
+                "you were silent: first say what happened in the missing days "
+                "(--while-away \"...\") before checking in")
     t = now()
     date = t.date().isoformat()
     verdict = check_verdict(args.verdict)
@@ -634,12 +643,17 @@ def cmd_checkin_record(args):
         "- 判定: %s" % verdict,
         "- 判定理由: %s" % verdict_reason,
     ]
+    if away:
+        lines.append("- 这几天发生了什么: %s" % one_line(away, "--while-away"))
     path = log_path(date)
     if os.path.isfile(path) and os.path.getsize(path) > 0:
         head = "## %s 再次打卡" % t.strftime("%H:%M:%S")
     else:
         head = "# %s" % date
     append_log(date, head + "\n" + "\n".join(lines) + "\n")
+    state["streak"]["unrecorded"] = 0
+    recompute_drift(state)
+    save_state(state)
     tomorrow_date = (t.date() + datetime.timedelta(days=1)).isoformat()
     with open(levers_path(), "a", encoding="utf-8") as f:
         f.write(json.dumps({"date": tomorrow_date, "levers": tomorrow,
@@ -649,7 +663,7 @@ def cmd_checkin_record(args):
 
 
 def cmd_checkin_revise(args):
-    require_active()
+    state = backfill_unrecorded(require_active())
     t = now()
     date = t.date().isoformat()
     fact = one_line(args.new_fact, "--new-fact (a new fact is required to revise a verdict)")
@@ -663,7 +677,10 @@ def cmd_checkin_revise(args):
         raise CliError("no check-in recorded today: nothing to revise")
     append_log(date, "- 改判: %s → %s — 因 %s 事实改判 (%s)\n"
                % (previous, verdict, fact, t.strftime("%H:%M:%S")))
-    emit({"date": date, "previous": previous, "verdict": verdict})
+    recompute_drift(state)
+    save_state(state)
+    emit({"date": date, "previous": previous, "verdict": verdict,
+          "streak": streak_view(state)})
 
 
 def cmd_checkin_levers(args):
@@ -672,6 +689,104 @@ def cmd_checkin_levers(args):
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
         raise CliError("--date must be YYYY-MM-DD")
     emit({"date": date, "levers": saved_levers(date)})
+
+
+# ---- streaks, Unrecorded back-fill, escalation, DND (PROTOCOL.md section 5.2) --
+# state.streak_cursor = last day already finalized (set when the protocol
+# completes). Each interaction back-fills the days after the cursor and before
+# today: a non-DND day with no check-in log gets an appended "- 未记录" log
+# (ADR-0001: appended, existing logs untouched) and unrecorded += 1. Drift is
+# recomputed from the logs (see recompute_drift), never touched by Unrecorded.
+ESCALATION_AT = 3
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+UNRECORDED_LINE = "- 未记录"
+
+
+def check_date(value):
+    value = (value or "").strip()
+    try:
+        if not DATE_RE.match(value):
+            raise ValueError(value)
+        datetime.datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise CliError("date must be YYYY-MM-DD")
+    return value
+
+
+def log_verdicts():
+    """Sorted [(date, current verdict or None)] over all daily logs."""
+    folder = os.path.join(data_dir(), "log")
+    out = []
+    if os.path.isdir(folder):
+        for name in sorted(os.listdir(folder)):
+            if re.match(r"^\d{4}-\d{2}-\d{2}\.md$", name):
+                with open(os.path.join(folder, name), encoding="utf-8") as f:
+                    out.append((name[:-3], current_verdict(f.read())))
+    return out
+
+
+def recompute_drift(state):
+    """Consecutive trailing 走偏 days; Unrecorded and DND days are skipped
+    (they neither count nor break the run); any other verdict resets to 0."""
+    drift = 0
+    for _date, verdict in log_verdicts():
+        if verdict is None:
+            continue
+        drift = drift + 1 if verdict == "走偏" else 0
+    state["streak"]["drift"] = drift
+    update_escalation(state)
+
+
+def update_escalation(state):
+    st = state["streak"]
+    state["escalation"] = (st["drift"] >= ESCALATION_AT
+                           or st["unrecorded"] >= ESCALATION_AT)
+
+
+def backfill_unrecorded(state):
+    today = now().date()
+    cursor = state.get("streak_cursor")
+    if cursor is None:
+        return state
+    day = datetime.datetime.strptime(cursor, "%Y-%m-%d").date() + datetime.timedelta(days=1)
+    while day < today:
+        d = day.isoformat()
+        has_checkin = os.path.isfile(log_path(d)) and any(
+            v is not None for dd, v in log_verdicts() if dd == d)
+        if d not in state["dnd_dates"] and not has_checkin:
+            append_log(d, "# %s\n%s\n" % (d, UNRECORDED_LINE))
+            state["streak"]["unrecorded"] += 1
+        day += datetime.timedelta(days=1)
+    state["streak_cursor"] = (today - datetime.timedelta(days=1)).isoformat()
+    update_escalation(state)
+    save_state(state)
+    return state
+
+
+def streak_view(state):
+    st = state["streak"]
+    return {"drift": st["drift"], "unrecorded": st["unrecorded"],
+            "escalation": bool(state.get("escalation")),
+            "threshold": ESCALATION_AT, "dnd_dates": state["dnd_dates"]}
+
+
+def cmd_streak_status(args):
+    state = backfill_unrecorded(require_active())
+    emit(streak_view(state))
+
+
+def cmd_dnd(args):
+    state = load_state()
+    dates = state["dnd_dates"]
+    if args.dnd_command in ("add", "remove"):
+        d = check_date(args.date)
+        if args.dnd_command == "add" and d not in dates:
+            dates.append(d)
+            dates.sort()
+        if args.dnd_command == "remove" and d in dates:
+            dates.remove(d)
+        save_state(state)
+    emit({"dnd_dates": dates})
 
 
 def main(argv=None):
@@ -738,6 +853,7 @@ def main(argv=None):
     q.add_argument("--verdict")
     q.add_argument("--verdict-reason")
     q.add_argument("--tomorrow-lever", action="append")
+    q.add_argument("--while-away", dest="while_away")
     q.set_defaults(func=cmd_checkin_record)
     q = csub.add_parser("revise-verdict")
     q.add_argument("--new-fact")
@@ -746,6 +862,18 @@ def main(argv=None):
     q = csub.add_parser("levers")
     q.add_argument("--date")
     q.set_defaults(func=cmd_checkin_levers)
+    p = sub.add_parser("streak", help="drift/unrecorded counters and escalation flag")
+    ssub = p.add_subparsers(dest="streak_command")
+    ssub.required = True
+    ssub.add_parser("status").set_defaults(func=cmd_streak_status)
+    p = sub.add_parser("dnd", help="manage do-not-disturb dates")
+    dsub = p.add_subparsers(dest="dnd_command")
+    dsub.required = True
+    dsub.add_parser("list")
+    for name in ("add", "remove"):
+        q = dsub.add_parser(name)
+        q.add_argument("date")
+    p.set_defaults(func=cmd_dnd)
     args = parser.parse_args(argv)
     try:
         args.func(args)

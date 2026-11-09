@@ -54,12 +54,12 @@ class RecordTest(CheckinTestCase):
         self.checkin()
         first = self.read_data(*LOG)
         self.set_now("2026-01-15T22:30:00")
-        r = self.checkin(verdict="走偏", **{"verdict-reason": "晚上又刷手机"})
+        r = self.checkin(**{"verdict-reason": "晚上又补充"})
         self.assertEqual(r.returncode, 0, r.stderr)
         text = self.read_data(*LOG)
         self.assertTrue(text.startswith(first))
         self.assertIn("22:30:00", text[len(first):])
-        self.assertIn("- 判定: 走偏", text[len(first):])
+        self.assertIn("- 判定: 轻微偏离", text[len(first):])
 
     def test_refused_before_protocol_complete(self):
         class Fresh(CliTestCase):
@@ -81,6 +81,23 @@ class RecordTest(CheckinTestCase):
             self.assertFalse(os.path.exists(t.data_path("log", "2026-01-15.md")))
         finally:
             t.doCleanups()
+
+
+class SameDayRerunTest(CheckinTestCase):
+    def test_second_record_with_different_verdict_refused(self):
+        self.checkin(verdict="在轨")
+        before = self.read_data(*LOG)
+        r = self.checkin(verdict="走偏")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("revise-verdict", r.stderr)
+        self.assertIn("--new-fact", r.stderr)
+        self.assertEqual(self.read_data(*LOG), before)
+
+    def test_second_record_with_same_verdict_allowed(self):
+        self.checkin(verdict="在轨")
+        r = self.checkin(verdict="在轨")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("再次打卡", self.read_data(*LOG))
 
 
 class ReviseTest(CheckinTestCase):

@@ -825,6 +825,14 @@ def cmd_checkin_record(args):
     tomorrow = [one_line(x, "--tomorrow-lever") for x in (args.tomorrow_lever or [])]
     if not tomorrow:
         raise CliError("--tomorrow-lever is required (set tomorrow's Daily Levers)")
+    if os.path.isfile(log_path(date)):
+        with open(log_path(date), encoding="utf-8") as f:
+            current = current_verdict(f.read())
+        if current is not None and current != verdict:
+            raise CliError(
+                "a check-in with verdict %s is already recorded today; changing "
+                "the verdict needs a new fact: use `checkin revise-verdict "
+                "--new-fact \"...\" --verdict ...`" % current)
     done = one_line(args.levers_done, "--levers-done")
     action_reason = one_line(args.action_reason, "--action-reason")
     identity_reason = one_line(args.identity_reason, "--identity-reason")

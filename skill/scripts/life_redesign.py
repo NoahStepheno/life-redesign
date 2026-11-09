@@ -527,8 +527,8 @@ def cmd_protocol_answer(args):
         p["part"] = None
         p["redo"] = False
         state["phase"] = "active"
-        state.setdefault("streak_cursor",
-                         (now().date() - datetime.timedelta(days=1)).isoformat())
+        # the completion day is the baseline: it can never become Unrecorded
+        state.setdefault("streak_cursor", now().date().isoformat())
     save_state(state)
     emit({"answered": qid, "next": p["question"], "file": name,
           "phase": state["phase"]})
@@ -757,7 +757,8 @@ def backfill_unrecorded(state):
             append_log(d, "# %s\n%s\n" % (d, UNRECORDED_LINE))
             state["streak"]["unrecorded"] += 1
         day += datetime.timedelta(days=1)
-    state["streak_cursor"] = (today - datetime.timedelta(days=1)).isoformat()
+    state["streak_cursor"] = max(
+        cursor, (today - datetime.timedelta(days=1)).isoformat())
     update_escalation(state)
     save_state(state)
     return state

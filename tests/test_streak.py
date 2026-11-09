@@ -118,6 +118,25 @@ class UnrecordedTest(StreakTestCase):
         self.assertEqual(self.checkin(17).returncode, 0)
 
 
+class BaselineTest(StreakTestCase):
+    """Protocol completed on 2026-01-15 (the baseline day)."""
+
+    def test_completion_day_never_backfilled(self):
+        self.status(15)  # interaction on the completion day itself
+        s = self.status(16)
+        self.assertEqual(s["unrecorded"], 0)
+        self.assertFalse(os.path.exists(self.data_path("log", "2026-01-15.md")))
+
+    def test_first_checkin_next_day_not_refused(self):
+        r = self.checkin(16)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.status(16)["unrecorded"], 0)
+
+    def test_silence_after_completion_counts_from_next_day(self):
+        s = self.status(18)  # 16 and 17 missed
+        self.assertEqual(s["unrecorded"], 2)
+
+
 class DndTest(StreakTestCase):
     def test_add_list_remove(self):
         self.run_cli("dnd", "add", "2026-01-20")

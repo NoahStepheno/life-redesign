@@ -141,6 +141,29 @@ class LeverParsingTest(NotifyTestCase):
         self.assertIn("今日杠杆: 10 pushups; 5km run; read; write", text)
 
 
+class ReinstallTest(NotifyTestCase):
+    def mark_installed(self):
+        import json
+        state = self.read_state()
+        n = state["notify"]
+        n["installed"] = {"morning": n["times"]["morning"],
+                          "evening": n["times"]["evening"]}
+        self.write_data(json.dumps(state), "state.json")
+
+    def test_not_installed_never_requires_reinstall(self):
+        out = self.run_cli("notify", "config", "--morning", "07:00").json()
+        self.assertFalse(out["reinstall_required"])
+
+    def test_changed_times_after_install_require_reinstall(self):
+        self.mark_installed()
+        out = self.run_cli("notify", "config", "--show-user-text", "on").json()
+        self.assertFalse(out["reinstall_required"])
+        out = self.run_cli("notify", "config", "--evening", "22:00").json()
+        self.assertTrue(out["reinstall_required"])
+        out = self.run_cli("notify", "config", "--evening", "21:30").json()
+        self.assertFalse(out["reinstall_required"])
+
+
 class InstallTest(NotifyTestCase):
     def test_install_dry_run_prints_plists_and_commands(self):
         r = self.run_cli("notify", "install", "--dry-run")
@@ -260,6 +283,48 @@ class FireTest(NotifyTestCase):
 
 
 class TickTest(NotifyTestCase):
+    def fake_display(self):
+        """Put a fake terminal-notifier first on PATH that logs each call."""
+        log = os.path.join(self._tmp, "shown")
+        path = os.path.join(self._tmp, "bin")
+        os.makedirs(path)
+        tn = os.path.join(path, "terminal-notifier")
+        with open(tn, "w") as f:
+            f.write("#!/bin/sh\necho x >> %s\n" % log)
+        os.chmod(tn, 0o755)
+        self._orig_env = self.env
+
+        def env(**kw):
+            e = self._orig_env(**kw)
+            e["PATH"] = path + os.pathsep + e.get("PATH", "")
+            return e
+        self.env = env
+        return log
+
+    def test_tick_sends_each_slot_once_per_day(self):
+        log = self.fake_display()
+        self.set_now("2026-01-16T09:00:00")
+        t = self.plan("2026-01-16")["pushes"][1]["time"]
+        h, m = int(t[:2]), int(t[3:])
+        self.set_now("2026-01-16T%02d:%02d:30" % (h, m))
+        first = self.run_cli("notify", "fire", "random", "--tick").json()
+        self.assertTrue(first["fired"], first)
+        self.set_now("2026-01-16T%02d:%02d:30" % (h, m + 1 if m < 59 else m))
+        second = self.run_cli("notify", "fire", "random", "--tick").json()
+        self.assertFalse(second["fired"])
+        self.assertIn("already sent", second["skipped"])
+        with open(log) as f:
+            self.assertEqual(len(f.readlines()), 1)
+
+    def test_dry_run_does_not_record_as_sent(self):
+        self.set_now("2026-01-16T09:00:00")
+        t = self.plan("2026-01-16")["pushes"][1]["time"]
+        h, m = int(t[:2]), int(t[3:])
+        self.set_now("2026-01-16T%02d:%02d:30" % (h, m))
+        for _ in range(2):
+            out = self.run_cli("notify", "fire", "random", "--tick", "--dry-run").json()
+            self.assertNotIn("skipped", out)
+
     def test_tick_fires_only_at_planned_time(self):
         self.set_now("2026-01-16T09:00:00")
         t = self.plan("2026-01-16")["pushes"][1]["time"]

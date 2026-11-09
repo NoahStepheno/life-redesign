@@ -1233,6 +1233,14 @@ def on_off(value):
     return value == "on"
 
 
+def reinstall_required(cfg):
+    """Installed plists carry the times they were installed with."""
+    installed = cfg.get("installed")
+    if not installed:
+        return False
+    return any(installed.get(k) != cfg["times"][k] for k in ("morning", "evening"))
+
+
 def cmd_notify_config(args):
     state = load_state()
     cfg = notify_config(state)
@@ -1260,7 +1268,7 @@ def cmd_notify_config(args):
             raise CliError("--client is not a valid command line (%s)" % e)
         cfg["client"] = args.client
     save_state(state)
-    emit({"notify": cfg})
+    emit({"notify": cfg, "reinstall_required": reinstall_required(cfg)})
 
 
 def goals_section(name):
@@ -1402,6 +1410,11 @@ def display_command(title, text):
     return ["osascript", "-e", script]
 
 
+def cfg_sent(state):
+    """{slot: date} of the last push actually sent (idempotency for --tick)."""
+    return notify_config(state).setdefault("sent", {})
+
+
 def cmd_notify_fire(args):
     state = notify_state()
     now_dt = now()
@@ -1412,6 +1425,11 @@ def cmd_notify_fire(args):
               "fired": False}
     if entry is None:
         result["skipped"] = why or "not in today's plan"
+        emit(result)
+        return
+    sent = cfg_sent(state)
+    if args.tick and sent.get(args.slot) == date:
+        result["skipped"] = "already sent today"
         emit(result)
         return
     if args.tick:
@@ -1444,6 +1462,8 @@ def cmd_notify_fire(args):
             subprocess.run(cmd, stdin=subprocess.DEVNULL, check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             result["fired"] = True
+            sent[args.slot] = date
+            save_state(state)
         except (OSError, subprocess.SubprocessError):
             result["error"] = "display command failed"
     emit(result)

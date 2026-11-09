@@ -969,12 +969,19 @@ def backfill_unrecorded(state):
     if cursor is None:
         return state
     day = datetime.datetime.strptime(cursor, "%Y-%m-%d").date() + datetime.timedelta(days=1)
+    verdicts = dict(log_verdicts())
     while day < today:
         d = day.isoformat()
-        has_checkin = os.path.isfile(log_path(d)) and any(
-            v is not None for dd, v in log_verdicts() if dd == d)
+        has_checkin = verdicts.get(d) is not None
         if d not in state["dnd_dates"] and not has_checkin:
-            append_log(d, "# %s\n%s\n" % (d, UNRECORDED_LINE))
+            header = "# %s\n" % d
+            existing = ""
+            if os.path.isfile(log_path(d)):
+                with open(log_path(d), encoding="utf-8") as f:
+                    existing = f.read()
+            if re.search(r"(?m)^# %s[ \t]*$" % re.escape(d), existing):
+                header = ""
+            append_log(d, "%s%s\n" % (header, UNRECORDED_LINE))
             state["streak"]["unrecorded"] += 1
         day += datetime.timedelta(days=1)
     state["streak_cursor"] = max(

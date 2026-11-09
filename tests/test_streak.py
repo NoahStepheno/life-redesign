@@ -136,6 +136,29 @@ class BaselineTest(StreakTestCase):
         s = self.status(18)  # 16 and 17 missed
         self.assertEqual(s["unrecorded"], 2)
 
+    def test_verdictless_existing_log_gets_no_duplicate_header(self):
+        self.write_data("# 2026-01-16\n- 备注: 来自 apply-block\n",
+                        "log", "2026-01-16.md")
+        self.assertEqual(self.status(17)["unrecorded"], 1)
+        text = self.read_data("log", "2026-01-16.md")
+        self.assertEqual(text.count("# 2026-01-16"), 1)
+        self.assertTrue(text.startswith("# 2026-01-16\n- 备注: 来自 apply-block\n"))
+        self.assertIn("- 未记录", text)
+        self.assertEqual(self.status(17)["unrecorded"], 1)  # idempotent
+
+    def test_verdictless_log_without_header_gets_one(self):
+        self.write_data("随手记\n", "log", "2026-01-16.md")
+        self.status(17)
+        text = self.read_data("log", "2026-01-16.md")
+        self.assertTrue(text.startswith("随手记\n"))
+        self.assertEqual(text.count("# 2026-01-16"), 1)
+
+    def test_voluntary_checkin_on_dnd_day_allowed_and_not_unrecorded(self):
+        self.run_cli("dnd", "add", "2026-01-16")
+        self.assertEqual(self.status(16)["unrecorded"], 0)
+        self.assertEqual(self.checkin(16).returncode, 0)
+        self.assertEqual(self.status(17)["unrecorded"], 0)
+
 
 class DndTest(StreakTestCase):
     def test_add_list_remove(self):

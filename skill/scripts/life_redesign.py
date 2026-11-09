@@ -253,6 +253,223 @@ def cmd_show(args):
           "versions": versions})
 
 
+# ---- one-day protocol: progress and resume (PROTOCOL.md section 4) ----------
+# Question ids follow PROTOCOL.md numbering. Part 2 interrupts are not
+# answered through this path: they are timed pushes, not sequential gates.
+QUESTIONS = (["1.%d" % i for i in range(1, 15)]
+             + ["3.%d" % i for i in range(1, 8)] + ["3.constraints"])
+SHELVE_AFTER = datetime.timedelta(days=7)
+
+
+def question_part(qid):
+    return int(qid.split(".")[0])
+
+
+def parse_ts(raw):
+    return datetime.datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S")
+
+
+def protocol_dir():
+    return os.path.join(data_dir(), "protocol")
+
+
+def empty_protocol():
+    return {"started_at": None, "part": None, "question": None,
+            "last_activity": None, "files": [], "redo": False}
+
+
+def proto_of(state):
+    p = state.setdefault("protocol", {})
+    for k, v in empty_protocol().items():
+        p.setdefault(k, v)
+    return p
+
+
+def move_marked(state, marker):
+    """Rename the current segment's files to <name>.<marker>.md (never delete)."""
+    p = proto_of(state)
+    for name in p["files"]:
+        src = os.path.join(protocol_dir(), name)
+        if not os.path.isfile(src):
+            continue
+        stem = name[:-3]
+        n = 1
+        dst = "%s.%s.md" % (stem, marker)
+        while os.path.exists(os.path.join(protocol_dir(), dst)):
+            n += 1
+            dst = "%s.%s.%d.md" % (stem, marker, n)
+        os.rename(src, os.path.join(protocol_dir(), dst))
+    p["files"] = []
+
+
+def begin_segment(state):
+    p = proto_of(state)
+    t = now().isoformat()
+    p.update({"started_at": t, "last_activity": t, "files": [],
+              "part": 1, "question": QUESTIONS[0]})
+
+
+def in_flight(state):
+    """A segment is running: first run in progress, or a redo over active."""
+    return state["phase"] == "protocol_in_progress" or (
+        state["phase"] == "active" and proto_of(state)["redo"])
+
+
+def feeling_check_required(state):
+    p = proto_of(state)
+    return (in_flight(state) and p["question"] != QUESTIONS[0]
+            and p["last_activity"] is not None
+            and parse_ts(p["last_activity"]).date() < now().date())
+
+
+def refresh(state):
+    """Apply the 7-day shelving rule lazily; persists when it changes state."""
+    p = proto_of(state)
+    if in_flight(state) and p["last_activity"] is not None \
+            and now() - parse_ts(p["last_activity"]) > SHELVE_AFTER:
+        move_marked(state, "archived")
+        was_redo = p["redo"]
+        state["protocol"] = empty_protocol()
+        if not was_redo:
+            state["phase"] = "protocol_shelved"
+        save_state(state)
+    return state
+
+
+def require_active(state=None):
+    """Gate for checkin/review/plan: return state, or refuse unless phase is active."""
+    if state is None:
+        state = load_state()
+    state = refresh(state)
+    if state["phase"] != "active":
+        raise CliError(
+            "the protocol is not complete (phase: %s): finish the protocol first "
+            "(`protocol resume`, then answer every question)" % state["phase"])
+    return state
+
+
+def protocol_report(state):
+    p = proto_of(state)
+    q = p["question"]
+    return {
+        "phase": state["phase"],
+        "redo": p["redo"],
+        "part": p["part"],
+        "question": q,
+        "answered": QUESTIONS.index(q) if q in QUESTIONS else
+        (len(QUESTIONS) if state["phase"] == "active" and not p["redo"] else 0),
+        "total": len(QUESTIONS),
+        "feeling_check_required": feeling_check_required(state),
+    }
+
+
+def cmd_protocol_status(args):
+    emit(protocol_report(refresh(load_state())))
+
+
+def cmd_protocol_gate(args):
+    require_active()
+    emit({"active": True})
+
+
+def cmd_protocol_resume(args):
+    state = refresh(load_state())
+    if state["phase"] == "active" and not proto_of(state)["redo"]:
+        raise CliError("protocol already complete; use `protocol redo` to redo it explicitly")
+    if state["phase"] in ("new", "protocol_shelved"):
+        state["phase"] = "protocol_in_progress"
+        begin_segment(state)
+        save_state(state)
+    emit(protocol_report(state))
+
+
+def cmd_protocol_confirm(args):
+    state = refresh(load_state())
+    if not feeling_check_required(state):
+        raise CliError("no feeling check pending")
+    p = proto_of(state)
+    if args.feeling == "fresh":
+        p["last_activity"] = now().isoformat()
+    else:
+        move_marked(state, "discarded")
+        begin_segment(state)
+    save_state(state)
+    emit(protocol_report(state))
+
+
+def cmd_protocol_redo(args):
+    state = refresh(load_state())
+    if state["phase"] != "active":
+        raise CliError("redo needs a completed protocol (phase active); use `protocol resume`")
+    if proto_of(state)["redo"]:
+        raise CliError("a redo is already in progress; use `protocol resume`")
+    begin_segment(state)
+    proto_of(state)["redo"] = True
+    save_state(state)
+    emit(protocol_report(state))
+
+
+def segment_file(state):
+    p = proto_of(state)
+    today = now().date().isoformat()
+    for name in p["files"]:
+        if name.startswith(today):
+            return name
+    n = 1
+    name = today + ".md"
+    while os.path.exists(os.path.join(protocol_dir(), name)):
+        n += 1
+        name = "%s.%d.md" % (today, n)
+    p["files"].append(name)
+    return name
+
+
+def cmd_protocol_answer(args):
+    state = refresh(load_state())
+    p = proto_of(state)
+    qid = args.question_id
+    if qid not in QUESTIONS:
+        raise CliError("unknown question id %r (valid: %s)" % (qid, ", ".join(QUESTIONS)))
+    if state["phase"] == "active" and not p["redo"]:
+        raise CliError("protocol already complete; use `protocol redo` to redo it explicitly")
+    if not in_flight(state):
+        raise CliError("protocol not started: run `protocol resume` first")
+    if feeling_check_required(state):
+        raise CliError("overnight return: run `protocol confirm-feeling fresh|faded` first")
+    if qid != p["question"]:
+        raise CliError("answer questions in order: current question is %s" % p["question"])
+    if args.text is None:
+        raise CliError("--text is required")
+    body = check_body(args.text, "--text", r"^## ")
+    name = segment_file(state)
+    os.makedirs(protocol_dir(), exist_ok=True)
+    path = os.path.join(protocol_dir(), name)
+    existing = ""
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            existing = f.read()
+    entry = "## %s\n%s\n" % (qid, body)
+    if existing.strip():
+        entry = ("\n" if existing.endswith("\n") else "\n\n") + entry
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(entry)
+        f.flush()
+        os.fsync(f.fileno())
+    i = QUESTIONS.index(qid)
+    p["last_activity"] = now().isoformat()
+    if i + 1 < len(QUESTIONS):
+        p["question"] = QUESTIONS[i + 1]
+        p["part"] = question_part(p["question"])
+    else:
+        p["question"] = None
+        p["part"] = None
+        p["redo"] = False
+        state["phase"] = "active"
+    save_state(state)
+    emit({"answered": qid, "next": p["question"], "file": name,
+          "phase": state["phase"]})
+
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
@@ -280,6 +497,20 @@ def main(argv=None):
     p = sub.add_parser("show", help="show all versions; current is the last")
     p.add_argument("target", choices=sorted(APPEND_TARGETS))
     p.set_defaults(func=cmd_show)
+    p = sub.add_parser("protocol", help="one-day protocol progress and resume")
+    psub = p.add_subparsers(dest="protocol_command")
+    psub.required = True
+    psub.add_parser("status").set_defaults(func=cmd_protocol_status)
+    psub.add_parser("resume").set_defaults(func=cmd_protocol_resume)
+    psub.add_parser("redo").set_defaults(func=cmd_protocol_redo)
+    psub.add_parser("gate").set_defaults(func=cmd_protocol_gate)
+    q = psub.add_parser("answer")
+    q.add_argument("question_id")
+    q.add_argument("--text")
+    q.set_defaults(func=cmd_protocol_answer)
+    q = psub.add_parser("confirm-feeling")
+    q.add_argument("feeling", choices=["fresh", "faded"])
+    q.set_defaults(func=cmd_protocol_confirm)
     args = parser.parse_args(argv)
     try:
         args.func(args)

@@ -147,7 +147,7 @@ SECTION_RE = re.compile(r"^### (.+?)[ \t]*$")
 
 def reject_destructive(argv):
     value_flags = {"--text", "--year-goal", "--month-project", "--constraints",
-                   "--why"}
+                   "--why", "--period"}
     checked = []
     skip = False
     for i, tok in enumerate(argv):
@@ -724,6 +724,7 @@ def cmd_protocol_answer(args):
         state["phase"] = "active"
         # the completion day is the baseline: it can never become Unrecorded
         state.setdefault("streak_cursor", now().date().isoformat())
+        state.setdefault("activated_on", now().date().isoformat())
     save_state(state)
     emit({"answered": qid, "next": p["question"], "file": name,
           "phase": state["phase"]})
@@ -983,6 +984,155 @@ def cmd_dnd(args):
             dates.remove(d)
         save_state(state)
     emit({"dnd_dates": dates})
+
+
+# ---- review: monthly / yearly data (PROTOCOL.md section 7) ------------------
+# Read-only day classification for a period (nothing is back-filled):
+#   A day with a verdict (last 判定/改判 line) counts by that verdict, always.
+#   Otherwise, in order:
+#     day <= activation day      -> excluded "before_activation"
+#     DND date                   -> excluded "dnd" (listed in dnd_days; never unrecorded)
+#     day >= today               -> excluded "future_or_today_pending"
+#     else                       -> unrecorded (missing log or `- 未记录`)
+#   So counts sum to days_in_scope, and scope + excluded == days_in_period.
+REVIEW_KINDS = {"month": "月复盘", "year": "年复盘"}
+NO_CHANGE_MONTH = "本月计划未改动"
+VERDICT_KEYS = {"在轨": "on_track", "轻微偏离": "minor_drift", "走偏": "drifted"}
+
+
+def activation_day(state):
+    raw = state.get("activated_on") or state.get("streak_cursor")
+    logs = log_verdicts()
+    days = [d for d in (raw, logs[0][0] if logs else None) if d]
+    return min(days) if days else now().date().isoformat()
+
+
+def period_distribution(state, first, last):
+    today = now().date()
+    act = datetime.datetime.strptime(activation_day(state), "%Y-%m-%d").date()
+    verdicts = dict(log_verdicts())
+    counts = {"on_track": 0, "minor_drift": 0, "drifted": 0, "unrecorded": 0}
+    dnd, before, pending = [], 0, 0
+    day = first
+    while day <= last:
+        d = day.isoformat()
+        v = verdicts.get(d)
+        if v in VERDICT_KEYS:
+            counts[VERDICT_KEYS[v]] += 1
+        elif day <= act:
+            before += 1
+        elif d in state["dnd_dates"]:
+            dnd.append(d)
+        elif day >= today:
+            pending += 1
+        else:
+            counts["unrecorded"] += 1
+        day += datetime.timedelta(days=1)
+    return {
+        "days_in_period": (last - first).days + 1,
+        "days_in_scope": sum(counts.values()),
+        "counts": counts,
+        "dnd_days": dnd,
+        "excluded": {"before_activation": before,
+                     "future_or_today_pending": pending, "dnd": len(dnd)},
+    }
+
+
+def plan_changes(first, last):
+    """Plan changes (see is_change below) dated within [first, last]."""
+    out = []
+    for target in ("vision", "anti-vision", "goals"):
+        prev = None
+        for v in read_versions(target):
+            # a file's first version is the initial plan unless it carries a
+            # plan-change reason; every later version is a change
+            is_change = prev is not None or "reason" in v
+            if is_change and first.isoformat() <= v["date"] <= last.isoformat():
+                item = {"object": target, "date": v["date"],
+                        "reason": v.get("reason")}
+                if target == "goals":
+                    item["sections"] = [
+                        t for t, _ in ALL_GOAL_SECTIONS
+                        if v["sections"].get(t) is not None
+                        and v["sections"].get(t) != (
+                            prev["sections"].get(t) if prev else None)]
+                out.append(item)
+            prev = v
+    out.sort(key=lambda c: (c["date"], c["object"]))
+    return out
+
+
+def year_goal_history():
+    out, last = [], None
+    for v in read_versions("goals"):
+        text = v["sections"].get("Year Goal")
+        if text is not None and text != last:
+            out.append({"date": v["date"], "text": text,
+                        "reason": v.get("reason")})
+            last = text
+    return out
+
+
+def cmd_review_month(args):
+    state = require_active()
+    if args.month:
+        try:
+            first = datetime.datetime.strptime(args.month, "%Y-%m").date()
+        except ValueError:
+            raise CliError("--month must be YYYY-MM")
+    else:
+        first = now().date().replace(day=1)
+    nxt = (first.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+    last = nxt - datetime.timedelta(days=1)
+    changes = plan_changes(first, last)
+    out = {"kind": "month", "month": first.strftime("%Y-%m")}
+    out.update(period_distribution(state, first, last))
+    out["plan_changes"] = changes
+    out["plan_unchanged"] = not changes
+    out["plan_message"] = NO_CHANGE_MONTH if not changes else None
+    emit(out)
+
+
+def cmd_review_year(args):
+    state = require_active()
+    year = args.year if args.year else now().year
+    if not 1 <= year <= 9999:
+        raise CliError("--year must be YYYY")
+    first, last = datetime.date(year, 1, 1), datetime.date(year, 12, 31)
+    out = {"kind": "year", "year": year}
+    out.update(period_distribution(state, first, last))
+    out["year_goal_history"] = year_goal_history()
+    out["plan_changes"] = plan_changes(first, last)
+    out["offer_redo_protocol"] = True
+    emit(out)
+
+
+def cmd_review_save(args):
+    require_active()
+    if args.text is None:
+        raise CliError("--text is required")
+    text = check_body(args.text, "--text", r"^## ")
+    today = now().date()
+    period = args.period or (today.strftime("%Y-%m") if args.kind == "month"
+                             else str(today.year))
+    pattern = r"^\d{4}-\d{2}$" if args.kind == "month" else r"^\d{4}$"
+    if not re.match(pattern, period):
+        raise CliError("--period must be %s"
+                       % ("YYYY-MM" if args.kind == "month" else "YYYY"))
+    path = os.path.join(data_dir(), "reviews.md")
+    existing = ""
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            existing = f.read()
+    entry = "## %s %s %s\n%s\n" % (today.isoformat(), REVIEW_KINDS[args.kind],
+                                   period, text)
+    if existing.strip():
+        entry = ("\n" if existing.endswith("\n") else "\n\n") + entry
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(entry)
+    emit({"kind": args.kind, "period": period, "date": today.isoformat(),
+          "file": "reviews.md",
+          "reviews": len(re.findall(r"(?m)^## ", existing + entry))})
 
 
 # ---- notify: push scheduling, text, launchd (PROTOCOL.md section 8) ----------
@@ -1413,6 +1563,20 @@ def main(argv=None):
         q = dsub.add_parser(name)
         q.add_argument("date")
     p.set_defaults(func=cmd_dnd)
+    p = sub.add_parser("review", help="monthly/yearly review data and saved conclusions")
+    rsub = p.add_subparsers(dest="review_command")
+    rsub.required = True
+    q = rsub.add_parser("month")
+    q.add_argument("--month")
+    q.set_defaults(func=cmd_review_month)
+    q = rsub.add_parser("year")
+    q.add_argument("--year", type=int)
+    q.set_defaults(func=cmd_review_year)
+    q = rsub.add_parser("save")
+    q.add_argument("--kind", required=True, choices=sorted(REVIEW_KINDS))
+    q.add_argument("--period")
+    q.add_argument("--text")
+    q.set_defaults(func=cmd_review_save)
     p = sub.add_parser("notify", help="push schedule, text and launchd install")
     nsub = p.add_subparsers(dest="notify_command")
     nsub.required = True

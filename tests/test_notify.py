@@ -114,6 +114,15 @@ class PrivacyTest(NotifyTestCase):
             "SECRET", self.run_cli("notify", "plan", "--date", "2026-01-16").stdout)
 
 
+class LeverParsingTest(NotifyTestCase):
+    def test_list_marker_stripped_but_leading_digits_kept(self):
+        self.run_cli("plan", "change", "daily-levers", "--why", "r",
+                     "--text", "- 10 pushups\n5km run\n1. read\n2) write")
+        self.run_cli("notify", "config", "--show-user-text", "on")
+        text = self.plan("2026-01-16")["pushes"][0]["text"]
+        self.assertIn("今日杠杆: 10 pushups; 5km run; read; write", text)
+
+
 class InstallTest(NotifyTestCase):
     def test_install_dry_run_prints_plists_and_commands(self):
         r = self.run_cli("notify", "install", "--dry-run")

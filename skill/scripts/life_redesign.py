@@ -1231,12 +1231,15 @@ def goals_section(name):
     return versions[-1].get("sections", {}).get(name, "")
 
 
+LIST_MARKER_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+")
+
+
 def day_levers(date):
     levers = saved_levers(date)
     if levers:
         return list(levers)
     text = goals_section("Daily Levers")
-    return [ln.strip().lstrip("-*0123456789. ").strip()
+    return [LIST_MARKER_RE.sub("", ln).strip()
             for ln in text.split("\n") if ln.strip()]
 
 

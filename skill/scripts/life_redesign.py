@@ -705,6 +705,72 @@ def segment_file(state):
     return name
 
 
+FIRST_VERSION_REASON = "来自一天协议"
+REDO_VERSION_REASON = "来自重做的一天协议"
+
+
+def segment_answers(state):
+    """Latest answer per question id in the running segment (verbatim)."""
+    answers = {}
+    for name in proto_of(state)["files"]:
+        path = os.path.join(protocol_dir(), name)
+        if not os.path.isfile(path):
+            continue
+        qid = None
+        with open(path, encoding="utf-8") as f:
+            for line in f.read().split("\n"):
+                m = re.match(r"^## (\S+)[ \t]*$", line)
+                if m:
+                    qid = m.group(1)
+                    answers[qid] = []
+                elif qid is not None:
+                    answers[qid].append(line)
+    return {k: "\n".join(v).strip() for k, v in answers.items()}
+
+
+def first_version_entries(answers, redo):
+    """(append target, entry text) pairs built only from the user's answers."""
+    for qid in ("1.13", "3.3", "3.4", "3.5", "3.6", "3.7", "3.constraints"):
+        if not answers.get(qid):
+            raise CliError("cannot write the plan files: no answer recorded for %s" % qid)
+    reason = REDO_VERSION_REASON if redo else FIRST_VERSION_REASON
+    date = now().date().isoformat()
+    goals = {"Year Goal": answers["3.5"], "Month Project": answers["3.6"],
+             "Daily Levers": answers["3.7"], "Constraints": answers["3.constraints"]}
+    bodies = [
+        ("anti-vision", answers["3.3"]),
+        ("vision", "%s\n\nIdentity Statement: %s" % (answers["3.4"], answers["1.13"])),
+        ("goals", goals_text(goals)),
+    ]
+    return [(t, "## %s\n%s\n_Reason: %s_\n" % (date, b, reason)) for t, b in bodies]
+
+
+def write_group(entries):
+    """Append every (path, entry) or none: undo the appends already done on failure."""
+    undo = []
+    try:
+        for path, entry in entries:
+            size = os.path.getsize(path) if os.path.isfile(path) else None
+            undo.append((path, size))
+            append_entry(path, entry, sync=True)
+    except (OSError, UnicodeError) as e:
+        rollback_group(undo)
+        raise CliError("could not write the plan files (nothing was written): %s" % e)
+    return undo
+
+
+def rollback_group(undo):
+    for path, size in reversed(undo):
+        try:
+            if size is None:
+                if os.path.isfile(path):
+                    os.remove(path)
+            else:
+                os.truncate(path, size)
+        except OSError:
+            pass
+
+
 def cmd_protocol_answer(args):
     state = refresh(load_state())
     p = proto_of(state)
@@ -722,11 +788,25 @@ def cmd_protocol_answer(args):
     if args.text is None:
         raise CliError("--text is required")
     body = check_body(args.text, "--text", r"^## ")
-    name = segment_file(state)
-    os.makedirs(protocol_dir(), exist_ok=True)
-    path = os.path.join(protocol_dir(), name)
-    append_entry(path, "## %s\n%s\n" % (qid, body), sync=True)
     i = QUESTIONS.index(qid)
+    last = i + 1 >= len(QUESTIONS)
+    undo = []
+    if last:
+        # Final answer: write the first plan version from the user's own words,
+        # all files or none, before the answer is recorded and phase flips.
+        answers = segment_answers(state)
+        answers[qid] = body
+        entries = first_version_entries(answers, p["redo"])
+        undo = write_group([(os.path.join(data_dir(), APPEND_TARGETS[t]), e)
+                            for t, e in entries])
+    name = segment_file(state)
+    try:
+        os.makedirs(protocol_dir(), exist_ok=True)
+        path = os.path.join(protocol_dir(), name)
+        append_entry(path, "## %s\n%s\n" % (qid, body), sync=True)
+    except OSError as e:
+        rollback_group(undo)
+        raise CliError("could not record the answer (nothing was written): %s" % e)
     p["last_activity"] = now().isoformat()
     if i + 1 < len(QUESTIONS):
         p["question"] = QUESTIONS[i + 1]
@@ -1063,8 +1143,10 @@ def plan_changes(first, last):
         prev = None
         for v in read_versions(target):
             # a file's first version is the initial plan unless it carries a
-            # plan-change reason; every later version is a change
-            is_change = prev is not None or "reason" in v
+            # plan-change reason; every later version is a change. The
+            # protocol's own first version is the initial plan, not a change.
+            is_change = prev is not None or (
+                "reason" in v and v["reason"] != FIRST_VERSION_REASON)
             if is_change and first.isoformat() <= v["date"] <= last.isoformat():
                 item = {"object": target, "date": v["date"],
                         "reason": v.get("reason")}

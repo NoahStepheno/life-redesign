@@ -42,7 +42,7 @@ python3 "<skill_dir>/scripts/life_redesign.py" <命令> [参数]
 
 | 入口 | 做什么 | 主要命令 | 流程所在 |
 |---|---|---|---|
-| `start` | 一次性的一天协议,支持断点续做、重做 | `LR protocol status`;`LR protocol resume`(开始/续做);`LR protocol answer <题号> --text "<原话>"`(题号 1.1–1.14、3.1–3.7、3.constraints,按序);`LR protocol confirm-feeling fresh\|faded`(隔夜回来);`LR append anti-vision\|vision --text`、`LR append goals --year-goal --month-project --constraints`、`LR plan change daily-levers --text --why`(写第一版,见 PROTOCOL 5.5);`LR protocol redo`(重做) | PROTOCOL 第 5 节 |
+| `start` | 一次性的一天协议,支持断点续做、重做 | `LR protocol status`;`LR protocol resume`(开始/续做);`LR protocol answer <题号> --text "<原话>"`(题号 1.1–1.14、3.1–3.7、3.constraints,按序);`LR protocol confirm-feeling fresh\|faded`(隔夜回来)(答完最后一题时 CLI 自动把用户原话写成第一版计划文件,见 PROTOCOL 5.5);`LR protocol redo`(重做) | PROTOCOL 第 5 节 |
 | `checkin` | 每晚打卡,产出判定 | `LR show anti-vision\|vision\|goals`;`LR checkin levers`;`LR streak status`;`LR checkin record --lever --levers-done --action-drift yes\|no --action-reason --identity-protection yes\|no --identity-reason --toward anti-vision\|vision --toward-reason --verdict 在轨\|轻微偏离\|走偏 --verdict-reason --tomorrow-lever [--while-away]`;`LR checkin revise-verdict --new-fact "<新事实>" --verdict <新判定>` | PROTOCOL 第 6 节 |
 | `review` | 月复盘 / 年复盘 | `LR review month [--month YYYY-MM]`;`LR review year [--year YYYY]`;`LR review save --kind month\|year [--period] --text`;下月/新年目标用 `LR plan change` | PROTOCOL 第 8 节 |
 | `plan` | 修改 Vision、目标、底线(追加新版本并记录原因) | `LR show ...`(先对比旧版本);`LR plan change <vision\|anti-vision\|year-goal\|month-project\|daily-levers\|constraints> --text "<用户措辞>" --why "<用户的原因>"` | PROTOCOL 第 7 节 |

@@ -15,6 +15,26 @@ INITIAL_STATE = {
 }
 
 
+class StateFileTest(CliTestCase):
+    def test_corrupt_state_is_a_clear_error_not_a_traceback(self):
+        self.run_cli("init")
+        self.write_data('{"phase": "ne', "state.json")
+        r = self.run_cli("status")
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("state.json", r.stderr)
+        self.assertIn("corrupt", r.stderr)
+
+    def test_save_is_atomic_replace_leaving_no_temp_files(self):
+        self.run_cli("init")
+        ino = os.stat(self.data_path("state.json")).st_ino
+        self.run_cli("dnd", "add", "2026-02-01")
+        self.assertEqual(self.read_state()["dnd_dates"], ["2026-02-01"])
+        self.assertNotEqual(os.stat(self.data_path("state.json")).st_ino, ino)
+        self.assertEqual(sorted(os.listdir(self.data_dir)),
+                         ["log", "protocol", "state.json"])
+
+
 class InitTest(CliTestCase):
     def test_init_creates_protocol_conformant_initial_state(self):
         r = self.run_cli("init")

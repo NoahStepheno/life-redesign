@@ -65,15 +65,28 @@ def load_state():
     path = state_path()
     if not os.path.isfile(path):
         raise CliError("not initialized: run `init` first")
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except ValueError as e:
+        raise CliError("state.json is corrupt (%s): %s" % (e, path))
 
 
 def save_state(state):
+    """Write to a temp file in the same dir, then atomically replace."""
     os.makedirs(data_dir(), exist_ok=True)
-    with open(state_path(), "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-        f.write("\n")
+    fd, tmp = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=data_dir())
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, state_path())
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
 
 
 def emit(obj):

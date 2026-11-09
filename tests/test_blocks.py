@@ -59,9 +59,10 @@ class ApplyBlockTest(CliTestCase):
             universal_newlines=True))
 
     def test_create_writes_file(self):
-        r = self.apply(block("log/2026-01-16.md", "create", "# 2026-01-16\n- 判定: 在轨"))
+        r = self.apply(block("log/2026-01-16.md", "create", "# 2026-01-16\n- 判定: 在轨\n- 判定理由: x"))
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.read_data("log", "2026-01-16.md"), "# 2026-01-16\n- 判定: 在轨\n")
+        self.assertEqual(self.read_data("log", "2026-01-16.md"),
+                         "# 2026-01-16\n- 判定: 在轨\n- 判定理由: x\n")
 
     def test_create_existing_fails_unchanged(self):
         self.write_data("orig\n", "log", "2026-01-16.md")
@@ -173,3 +174,149 @@ class SnapshotRealDataTest(ActiveCliTestCase):
             {"date": "2026-01-16", "verdict": "走偏"}])
         self.assertEqual(out["streak"]["drift"], 2)
         self.assertEqual(out["streak"]["unrecorded"], 2)
+
+
+class VerdictBlockTest(ActiveCliTestCase):
+    """Verdicts written through update blocks follow the check-in rules and
+    feed the same streak recomputation (issue #18)."""
+
+    def setUp(self):
+        super().setUp()
+        self.set_now("2026-01-15T09:00:00")  # protocol completed on the 15th
+
+    def apply(self, text):
+        return CliResult(subprocess.run(
+            [sys.executable, CLI, "apply-block"], input=text,
+            env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True))
+
+    def verdict_block(self, day, verdict, mode="create", reason="x"):
+        head = "# 2026-01-%02d\n" % day if mode == "create" else ""
+        return block("log/2026-01-%02d.md" % day, mode,
+                     head + "- 判定: %s\n- 判定理由: %s" % (verdict, reason))
+
+    def cli_checkin(self, day, verdict):
+        self.set_now("2026-01-%02dT21:00:00" % day)
+        r = self.run_cli(
+            "checkin", "record", "--lever", "写作", "--levers-done", "写了",
+            "--action-drift", "no", "--action-reason", "无",
+            "--identity-protection", "yes", "--identity-reason", "无",
+            "--toward", "vision", "--toward-reason", "写了",
+            "--verdict", verdict, "--verdict-reason", "x",
+            "--tomorrow-lever", "写作")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_drift_via_block_counts_and_returns_streak(self):
+        self.set_now("2026-01-18T09:00:00")
+        text = "".join(self.verdict_block(d, "走偏") for d in (15, 16, 17))
+        r = self.apply(text)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        streak = r.json()["streak"]
+        self.assertEqual((streak["drift"], streak["escalation"]), (3, True))
+        self.assertEqual(self.read_state()["streak"]["drift"], 3)
+        self.assertTrue(self.read_state()["escalation"])
+
+    def test_block_and_checkin_paths_agree(self):
+        for d in (15, 16, 17):
+            self.cli_checkin(d, "走偏")
+        via_cli = self.run_cli("streak", "status").json()
+        self.assertTrue(via_cli["escalation"])
+        # the same facts through update blocks in a fresh data dir
+        self.setUp()
+        self.set_now("2026-01-17T21:00:00")
+        r = self.apply("".join(self.verdict_block(d, "走偏") for d in (15, 16, 17)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json()["streak"], via_cli)
+        self.assertEqual(self.run_cli("streak", "status").json(), via_cli)
+
+    def test_non_drift_block_resets_drift(self):
+        self.cli_checkin(15, "走偏")
+        self.cli_checkin(16, "走偏")
+        self.set_now("2026-01-17T21:00:00")
+        r = self.apply(self.verdict_block(17, "轻微偏离"))
+        self.assertEqual(r.json()["streak"]["drift"], 0)
+        self.assertEqual(self.read_state()["streak"]["drift"], 0)
+
+    def test_missing_reason_or_bad_value_rejected_unchanged(self):
+        self.set_now("2026-01-16T09:00:00")
+        for body in ("# 2026-01-16\n- 判定: 走偏",
+                     "# 2026-01-16\n- 判定: 走偏\n- 判定理由:   ",
+                     "# 2026-01-16\n- 判定: 很糟\n- 判定理由: x",
+                     "# 2026-01-16\n- 判定:走偏\n- 判定理由: x"):
+            r = self.apply(block("log/2026-01-16.md", "create", body))
+            self.assertNotEqual(r.returncode, 0, body)
+            self.assertFalse(os.path.exists(self.data_path("log", "2026-01-16.md")))
+        self.assertEqual(self.read_state()["streak"]["drift"], 0)
+
+    def test_rejected_batch_writes_nothing(self):
+        self.set_now("2026-01-16T09:00:00")
+        good = self.verdict_block(15, "走偏")
+        bad = block("log/2026-01-16.md", "create", "- 判定: 走偏")
+        r = self.apply(good + bad)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(self.data_path("log", "2026-01-15.md")))
+
+    def test_appending_different_verdict_rejected(self):
+        self.cli_checkin(15, "在轨")
+        before = self.read_data("log", "2026-01-15.md")
+        r = self.apply(self.verdict_block(15, "走偏", mode="append"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("new fact", r.stderr)
+        self.assertEqual(self.read_data("log", "2026-01-15.md"), before)
+        # also within one batch
+        r = self.apply(self.verdict_block(20, "在轨")
+                       + self.verdict_block(20, "走偏", mode="append"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(self.data_path("log", "2026-01-20.md")))
+
+    def test_same_verdict_again_is_allowed_but_needs_reason(self):
+        self.cli_checkin(15, "在轨")
+        r = self.apply(self.verdict_block(15, "在轨", mode="append"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.apply(block("log/2026-01-15.md", "append", "- 判定: 在轨"))
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_revision_line_accepted_and_recomputes(self):
+        for d in (15, 16, 17):
+            self.cli_checkin(d, "走偏")
+        self.assertTrue(self.run_cli("streak", "status").json()["escalation"])
+        line = "- 改判: 走偏 → 在轨 — 因 跑了步 事实改判 (21:30:00)"
+        r = self.apply(block("log/2026-01-17.md", "append", line))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json()["streak"]["drift"], 0)
+        self.assertFalse(r.json()["streak"]["escalation"])
+        self.assertIn(line, self.read_data("log", "2026-01-17.md"))
+
+    def test_bad_revisions_rejected(self):
+        self.cli_checkin(15, "走偏")
+        before = self.read_data("log", "2026-01-15.md")
+        for line in ("- 改判: 走偏 → 在轨 — 因  事实改判",       # empty fact
+                     "- 改判: 在轨 → 走偏 — 因 吵架 事实改判",  # wrong previous
+                     "- 改判: 走偏 → 很好 — 因 跑步 事实改判",  # illegal value
+                     "- 改判: 走偏 到 在轨"):                    # malformed
+            r = self.apply(block("log/2026-01-15.md", "append", line))
+            self.assertNotEqual(r.returncode, 0, line)
+        self.assertEqual(self.read_data("log", "2026-01-15.md"), before)
+        r = self.apply(block("log/2026-01-19.md", "create",
+                             "- 改判: 走偏 → 在轨 — 因 跑步 事实改判"))
+        self.assertNotEqual(r.returncode, 0)  # nothing to revise
+
+    def test_verdict_on_unrecorded_placeholder_day(self):
+        self.cli_checkin(15, "在轨")
+        self.set_now("2026-01-19T09:00:00")  # 16, 17, 18 missed
+        s = self.run_cli("streak", "status").json()
+        self.assertEqual(s["unrecorded"], 3)
+        self.assertTrue(s["escalation"])
+        r = self.apply(self.verdict_block(18, "在轨", mode="append"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json()["streak"]["unrecorded"], 0)
+        self.assertFalse(r.json()["streak"]["escalation"])
+        self.assertEqual(self.run_cli("streak", "status").json()["unrecorded"], 0)
+
+    def test_verdict_on_older_placeholder_day_leaves_later_ones(self):
+        self.cli_checkin(15, "在轨")
+        self.set_now("2026-01-19T09:00:00")  # 16, 17, 18 missed
+        self.run_cli("streak", "status")
+        r = self.apply(self.verdict_block(16, "在轨", mode="append"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.json()["streak"]["unrecorded"], 2)

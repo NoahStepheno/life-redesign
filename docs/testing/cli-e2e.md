@@ -14,7 +14,7 @@
 python3 -m unittest discover
 ```
 
-- 当前共 161 个测试,完整运行约 5 分钟(实测 321 秒,多数时间花在反复启动 CLI 子进程)。
+- 当前共 172 个测试,完整运行约 5 分钟(实测 321 秒,多数时间花在反复启动 CLI 子进程)。
 - 迭代时只跑一个模块、一个类或一个用例(实测分别约 54 秒、13 秒、3 秒;`test_init` 约 2 秒):
 
 ```sh
@@ -757,10 +757,10 @@ cat "$LIFE_REDESIGN_HOME/log/2026-02-01-note.md"
 ```
 
 ```output
-{"applied": [{"file": "log/2026-02-01-note.md", "mode": "create"}]}
+{"applied": [{"file": "log/2026-02-01-note.md", "mode": "create"}], "streak": {"drift": 0, "unrecorded": 0, "escalation": false, "threshold": 3, "dnd_dates": ["2026-01-26", "2026-01-30"]}}
 error: block 1: cannot create log/2026-02-01-note.md: file already exists (use mode: append)
 [exit 1]
-{"applied": [{"file": "log/2026-02-01-note.md", "mode": "append"}]}
+{"applied": [{"file": "log/2026-02-01-note.md", "mode": "append"}], "streak": {"drift": 0, "unrecorded": 0, "escalation": false, "threshold": 3, "dnd_dates": ["2026-01-26", "2026-01-30"]}}
 今天在聊天 App 里复盘了一遍。
 补充一句。
 ```
@@ -796,6 +796,75 @@ tail -14 "$LIFE_REDESIGN_HOME/goals.md"
 ### Daily Levers
 写 500 字
 跑步 20 分钟
+```
+
+写入 `log/` 的块如果含判定,走和 `checkin` 同样的规则,并按日志重算连续走偏与连续未记录(结果在 `streak` 字段里返回,与 `streak status` 一致)。新判定必须是 `- 判定: <在轨|轻微偏离|走偏>` 后紧跟 `- 判定理由: <理由>`;缺理由、判定值非法、对已有判定的一天追加不同的判定都会整批拒绝。改判要用带新事实的一行 `- 改判: <原判定> → <新判定> — 因 <新事实> 事实改判`:
+
+```sh
+lr apply-block <<'EOF'
+=== LIFE-REDESIGN UPDATE ===
+file: log/2026-02-01.md
+mode: create
+---
+# 2026-02-01
+- 判定: 走偏
+=== END ===
+EOF
+lr apply-block <<'EOF'
+=== LIFE-REDESIGN UPDATE ===
+file: log/2026-02-01.md
+mode: create
+---
+# 2026-02-01
+- 判定: 糟透了
+- 判定理由: 没做
+=== END ===
+EOF
+lr apply-block <<'EOF'
+=== LIFE-REDESIGN UPDATE ===
+file: log/2026-02-01.md
+mode: create
+---
+# 2026-02-01
+- 判定: 走偏
+- 判定理由: 一整天没有产出
+=== END ===
+EOF
+lr apply-block <<'EOF'
+=== LIFE-REDESIGN UPDATE ===
+file: log/2026-02-01.md
+mode: append
+---
+- 判定: 在轨
+- 判定理由: 想改一下
+=== END ===
+EOF
+lr apply-block <<'EOF'
+=== LIFE-REDESIGN UPDATE ===
+file: log/2026-02-01.md
+mode: append
+---
+- 改判: 走偏 → 在轨 — 因 晚上补做了 500 字 事实改判 (21:40:00)
+=== END ===
+EOF
+cat "$LIFE_REDESIGN_HOME/log/2026-02-01.md"
+lr streak status
+```
+
+```output
+error: block 1 (log/2026-02-01.md): '- 判定: 走偏' must be followed directly by a '- 判定理由: <reason>' line
+[exit 1]
+error: block 1 (log/2026-02-01.md): 判定 must be one of: 在轨 / 轻微偏离 / 走偏
+[exit 1]
+{"applied": [{"file": "log/2026-02-01.md", "mode": "create"}], "streak": {"drift": 1, "unrecorded": 0, "escalation": false, "threshold": 3, "dnd_dates": ["2026-01-26", "2026-01-30"]}}
+error: a check-in with verdict 走偏 is already recorded for this day; changing the verdict needs a new fact: use `checkin revise-verdict --new-fact "..." --verdict ...` (in an update block: a '- 改判: 走偏 → 在轨 — 因 <new fact> 事实改判' line)
+[exit 1]
+{"applied": [{"file": "log/2026-02-01.md", "mode": "append"}], "streak": {"drift": 0, "unrecorded": 0, "escalation": false, "threshold": 3, "dnd_dates": ["2026-01-26", "2026-01-30"]}}
+# 2026-02-01
+- 判定: 走偏
+- 判定理由: 一整天没有产出
+- 改判: 走偏 → 在轨 — 因 晚上补做了 500 字 事实改判 (21:40:00)
+{"drift": 0, "unrecorded": 0, "escalation": false, "threshold": 3, "dnd_dates": ["2026-01-26", "2026-01-30"]}
 ```
 
 ### 3.15 更新块的各种非法形式
@@ -1001,9 +1070,9 @@ error: block 1: goals content must be under a '### Year Goal|Month Project|Daily
 [exit 1]
 error: block 2: mode 'replace' not allowed; only create or append (records are append-only, ADR-0001)
 [exit 1]
-2026-01-30.md
 2026-01-31.md
 2026-02-01-note.md
+2026-02-01.md
 error: cannot read /tmp/no-such-file.txt: [Errno 2] No such file or directory: '/tmp/no-such-file.txt'
 [exit 1]
 ```

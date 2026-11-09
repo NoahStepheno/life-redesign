@@ -440,7 +440,18 @@ def validate_block(b, seen):
         if b["mode"] == "append" and not exists:
             raise CliError("block %d: cannot append to %s: file does not exist "
                            "(use mode: create)" % (n, b["file"]))
-        return {"full": full, "kind": kind, "mode": b["mode"], "body": body}
+        verdict = None
+        if b["file"].startswith("log/"):
+            # same rules as `checkin`; seen[full] is the day's verdict after
+            # earlier blocks of this batch
+            if full in seen:
+                verdict = seen[full]
+            elif os.path.isfile(full):
+                with open(full, encoding="utf-8") as f:
+                    verdict = current_verdict(f.read())
+            verdict = check_block_verdicts(n, b["file"], body, verdict)
+        return {"full": full, "kind": kind, "mode": b["mode"], "body": body,
+                "verdict": verdict}
     if kind == "goals.md":
         sections = {}
         name = None
@@ -479,11 +490,11 @@ def cmd_apply_block(args):
     else:
         text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
     blocks = parse_blocks(text)
-    seen = set()
+    seen = {}
     plan = []
     for b in blocks:  # validate everything before writing anything
         item = validate_block(b, seen)
-        seen.add(item["full"])
+        seen[item["full"]] = item.get("verdict")
         plan.append(item)
     for b, item in zip(blocks, plan):
         full = item["full"]
@@ -494,7 +505,15 @@ def cmd_apply_block(args):
             write_version(full, item["body"])
         else:
             append_entry(full, item["body"] + "\n", blank_line=False)
-    emit({"applied": [{"file": b["file"], "mode": b["mode"]} for b in blocks]})
+    out = {"applied": [{"file": b["file"], "mode": b["mode"]} for b in blocks]}
+    if any(b["file"].startswith("log/") for b in blocks):
+        # verdicts may have changed: back-fill and recompute exactly as checkin does
+        state = backfill_unrecorded(load_state())
+        recount_unrecorded(state)
+        recompute_drift(state)
+        save_state(state)
+        out["streak"] = streak_view(state)
+    emit(out)
 # ---- plan: change vision / anti-vision / goals sections (PROTOCOL.md s.6) ----
 # object -> (append target, goals section title or None)
 PLAN_OBJECTS = {
@@ -800,11 +819,68 @@ def yes_no(value):
     return "是" if value == "yes" else "否"
 
 
-def check_verdict(value):
-    verdict = one_line(value, "--verdict")
+def check_verdict(value, label="--verdict"):
+    verdict = one_line(value, label)
     if verdict not in VERDICTS:
-        raise CliError("--verdict must be one of: %s" % " / ".join(VERDICTS))
+        raise CliError("%s must be one of: %s" % (label, " / ".join(VERDICTS)))
     return verdict
+
+
+def check_verdict_change(current, verdict, day="today", block_hint=False):
+    """The same-day rule shared by `checkin record` and update blocks: an
+    existing verdict can only change through a 改判 with a new fact."""
+    if current is not None and current != verdict:
+        msg = ("a check-in with verdict %s is already recorded %s; changing "
+               "the verdict needs a new fact: use `checkin revise-verdict "
+               "--new-fact \"...\" --verdict ...`" % (current, day))
+        if block_hint:
+            msg += (" (in an update block: a '- 改判: %s → %s — 因 <new fact> "
+                    "事实改判' line)" % (current, verdict))
+        raise CliError(msg)
+
+
+# Full 改判 line as `checkin revise-verdict` writes it (time suffix optional).
+REVISION_FULL_RE = re.compile(
+    r"^- 改判: (.+?) → (.+?) — 因 (\S.*?) 事实改判(?: \(\d\d:\d\d:\d\d\))?\s*$")
+VERDICT_LIKE_RE = re.compile(r"^\s*- (判定|改判)\s*[:：]")
+
+
+def check_block_verdicts(n, rel, body, current):
+    """Validate the verdict lines of a block bound for log/YYYY-MM-DD.md with
+    the check-in rules. `current` is the day's verdict before the block;
+    returns the day's verdict after it."""
+    label = "block %d (%s)" % (n, rel)
+    lines = body.split("\n")
+    for i, line in enumerate(lines):
+        m = VERDICT_RE.match(line)
+        if m:
+            verdict = check_verdict(m.group(1), label + ": 判定")
+            check_verdict_change(current, verdict, "for this day", True)
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            rm = re.match(r"^- 判定理由: (.*)$", nxt)
+            if not rm:
+                raise CliError("%s: '- 判定: %s' must be followed directly by a "
+                               "'- 判定理由: <reason>' line" % (label, verdict))
+            one_line(rm.group(1), label + ": 判定理由")
+            current = verdict
+            continue
+        m = REVISION_FULL_RE.match(line)
+        if m:
+            previous = check_verdict(m.group(1), label + ": 改判 old verdict")
+            verdict = check_verdict(m.group(2), label + ": 改判 new verdict")
+            if current is None:
+                raise CliError("%s: no check-in recorded that day: nothing to revise" % label)
+            if previous != current:
+                raise CliError("%s: 改判 says the old verdict was %s but the day's "
+                               "current verdict is %s" % (label, previous, current))
+            current = verdict
+            continue
+        if VERDICT_LIKE_RE.match(line) and not line.startswith("- 判定理由:"):
+            raise CliError(
+                "%s: malformed verdict line %r (expected '- 判定: 在轨|轻微偏离|走偏' "
+                "followed by '- 判定理由: ...', or '- 改判: <old> → <new> — 因 "
+                "<new fact> 事实改判')" % (label, line))
+    return current
 
 
 def cmd_checkin_record(args):
@@ -831,11 +907,7 @@ def cmd_checkin_record(args):
     if os.path.isfile(log_path(date)):
         with open(log_path(date), encoding="utf-8") as f:
             current = current_verdict(f.read())
-        if current is not None and current != verdict:
-            raise CliError(
-                "a check-in with verdict %s is already recorded today; changing "
-                "the verdict needs a new fact: use `checkin revise-verdict "
-                "--new-fact \"...\" --verdict ...`" % current)
+        check_verdict_change(current, verdict)
     done = one_line(args.levers_done, "--levers-done")
     action_reason = one_line(args.action_reason, "--action-reason")
     identity_reason = one_line(args.identity_reason, "--identity-reason")
@@ -930,6 +1002,28 @@ def log_verdicts():
                 with open(os.path.join(folder, name), encoding="utf-8") as f:
                     out.append((name[:-3], current_verdict(f.read())))
     return out
+
+
+def recount_unrecorded(state):
+    """Unrecorded = the trailing run of days whose log holds only the
+    '- 未记录' placeholder. Any verdict (from `checkin record` or an update
+    block) ends the run, which is what `checkin record` does by resetting the
+    counter to 0. DND days are skipped."""
+    folder = os.path.join(data_dir(), "log")
+    run = 0
+    if os.path.isdir(folder):
+        for name in sorted(os.listdir(folder)):
+            if not re.match(r"^\d{4}-\d{2}-\d{2}\.md$", name):
+                continue
+            with open(os.path.join(folder, name), encoding="utf-8") as f:
+                text = f.read()
+            if current_verdict(text) is not None:
+                run = 0
+            elif (name[:-3] not in state["dnd_dates"]
+                  and UNRECORDED_LINE in text.split("\n")):
+                run += 1
+    state["streak"]["unrecorded"] = run
+    update_escalation(state)
 
 
 def recompute_drift(state):

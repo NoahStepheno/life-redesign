@@ -342,7 +342,7 @@ LR checkin record \
 
 ### 6.2 计数与升级
 
-- `streak.drift` = 日志中**结尾连续**的"走偏"天数。非走偏的判定把它归零;未记录日和勿扰日不计数,也不打断(中间隔着未记录日的两个走偏日仍算连续)。CLI 每次 `record` / `revise-verdict` 时按日志重算。
+- `streak.drift` = 日志中**结尾连续**的"走偏"天数。非走偏的判定把它归零;未记录日和勿扰日不计数,也不打断(中间隔着未记录日的两个走偏日仍算连续)。CLI 每次 `record` / `revise-verdict` / 应用含 `log/` 的更新块时按日志重算。
 - 当天没有打卡:次日首次调用 `checkin` / `streak status` / `notify` / `snapshot` 时,CLI 对中间每个非勿扰日补一行 `- 未记录`,`streak.unrecorded += 1`;一旦 `checkin record` 则重置为 0。勿扰日不计入。完成协议的当天永远不补记。
 - `streak.drift >= 3` 或 `streak.unrecorded >= 3`:CLI 把 `escalation` 置为 `true`(只是标志,不替你追问)。你必须触发**升级追问**:
   - 引用用户自己的 Anti-vision 原话,问:"你写过这个周二。这三天你在向哪个周二靠近?"
@@ -462,7 +462,8 @@ CLI 对更新块的规则(违反则整批拒绝,什么都不写,先全部校验�
 - `log/*.md` 与 `protocol/*.md`:`create` 要求文件不存在(`cannot create <file>: file already exists (use mode: append)`),`append` 要求文件已存在(`cannot append to <file>: file does not exist (use mode: create)`),内容原样追加到末尾。
 - `vision.md` / `anti-vision.md`:正文是新版本的内容,**不要自己写 `## 日期` 标题**(正文里出现以 `## ` 开头的行会被拒绝),CLI 加日期标题并追加。文件已存在时用 `append`;文件不存在时用 `create`,已存在却用 `create` 会被拒绝。
 - `goals.md`:正文必须按 `### Year Goal` / `### Month Project` / `### Daily Levers` / `### Constraints` 分节(未知小节被拒绝,小节外不能有文字);没写的小节沿用上一版。
-- 日志文件必须使用第 3 节的格式,尤其是 `- 判定: 在轨|轻微偏离|走偏` 一行:CLI 以后据此读取判定。B 档的更新块不改 `state.json`,所以 `streak` 要等下一次用 CLI 打卡/补记时才会重算。
+- 写入 `log/*.md` 的块里的判定与 `checkin` 同规则,违反则整批拒绝:新判定写成相邻两行 `- 判定: 在轨|轻微偏离|走偏` 与 `- 判定理由: <理由>`(判定值非法、缺理由或理由为空都拒绝);该日已有判定时,追加**不同**的判定会被拒绝(同一判定可再追加);改判必须写成带新事实的一行 `- 改判: <原判定> → <新判定> — 因 <新事实> 事实改判`(与 `revise-verdict` 写入的格式相同;原判定必须等于该日当前判定,新事实不能为空,该日还没有判定时无从改判)。
+- 应用含 `log/` 的块之后,CLI 与 `checkin` 一样先补记未记录,再按日志重算 `drift`、`unrecorded` 和 Escalation,并在输出的 `streak` 字段返回(同一组事实走更新块或走 `checkin`,得到相同的计数和 Escalation)。只有 `- 未记录` 占位的一天补上判定后不再算未记录。
 
 ---
 

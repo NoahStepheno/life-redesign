@@ -1,6 +1,8 @@
 import os
+import plistlib
 import stat
 import sys
+import unittest
 
 from tests.helpers import ActiveCliTestCase, CliTestCase
 
@@ -162,6 +164,73 @@ class ReinstallTest(NotifyTestCase):
         self.assertTrue(out["reinstall_required"])
         out = self.run_cli("notify", "config", "--evening", "21:30").json()
         self.assertFalse(out["reinstall_required"])
+
+
+class LaunchdEnvTest(NotifyTestCase):
+    def test_plist_sets_home_and_sane_path(self):
+        out = self.run_cli("notify", "install", "--dry-run").json()
+        for j in out["jobs"]:
+            plist = plistlib.loads(j["plist"].encode("utf-8"))
+            env = plist["EnvironmentVariables"]
+            self.assertEqual(env["HOME"], self.fake_home)
+            dirs = env["PATH"].split(":")
+            for d in ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
+                      os.path.join(self.fake_home, ".local", "bin")):
+                self.assertIn(d, dirs)
+
+    def test_path_includes_dir_of_absolute_client(self):
+        self.run_cli("notify", "config", "--client", "/opt/custom/tools/claude -p")
+        out = self.run_cli("notify", "install", "--dry-run").json()
+        env = plistlib.loads(out["jobs"][0]["plist"].encode("utf-8"))[
+            "EnvironmentVariables"]
+        self.assertIn("/opt/custom/tools", env["PATH"].split(":"))
+
+
+@unittest.skipUnless(sys.platform == "darwin", "launchd is macOS only")
+class LaunchdRunTest(NotifyTestCase):
+    def fake_launchctl(self, body):
+        d = os.path.join(self._tmp, "fakebin")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "launchctl")
+        with open(path, "w") as f:
+            f.write("#!/bin/sh\n" + body + "\n")
+        os.chmod(path, 0o755)
+        orig = self.env
+
+        def env(**kw):
+            e = orig(**kw)
+            e["PATH"] = d + os.pathsep + e.get("PATH", "")
+            return e
+        self.env = env
+
+    def test_success_reports_results_and_marks_installed(self):
+        self.fake_launchctl("exit 0")
+        r = self.run_cli("notify", "install")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = r.json()
+        self.assertEqual(out["failed"], [])
+        self.assertEqual(len(out["results"]), 3)
+        self.assertEqual(self.read_state()["notify"]["installed"],
+                         {"morning": "08:30", "evening": "21:30"})
+        self.assertTrue(os.path.isfile(os.path.join(
+            self.fake_home, "Library", "LaunchAgents",
+            "com.life-redesign.notify.morning.plist")))
+
+    def test_failing_launchctl_surfaces_stderr_and_exits_nonzero(self):
+        self.fake_launchctl('echo "Bootstrap failed: 5: Input/output error" >&2; exit 5')
+        r = self.run_cli("notify", "install")
+        self.assertNotEqual(r.returncode, 0)
+        out = r.json()
+        self.assertEqual(len(out["failed"]), 3)
+        self.assertIn("Input/output error", out["results"][0]["stderr"])
+        self.assertEqual(out["results"][0]["returncode"], 5)
+        self.assertNotIn("installed", self.read_state()["notify"])
+
+    def test_failing_uninstall_exits_nonzero(self):
+        self.fake_launchctl("echo nope >&2; exit 3")
+        r = self.run_cli("notify", "uninstall")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(len(r.json()["failed"]), 3)
 
 
 class InstallTest(NotifyTestCase):

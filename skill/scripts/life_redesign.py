@@ -1473,14 +1473,36 @@ def launchd_dir():
     return os.path.join(os.path.expanduser("~"), "Library", "LaunchAgents")
 
 
+def launchd_path(cfg):
+    """PATH for scheduled jobs: launchd's own is minimal (/usr/bin:/bin:...)."""
+    home = os.path.expanduser("~")
+    dirs = ["/opt/homebrew/bin", "/usr/local/bin",
+            os.path.join(home, ".local", "bin"),
+            "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    try:
+        argv = shlex.split(cfg["client"])
+    except ValueError:
+        argv = []
+    if argv and os.path.isabs(argv[0]):
+        dirs.insert(0, os.path.dirname(argv[0]))
+    out = []
+    for d in dirs:
+        if d not in out:
+            out.append(d)
+    return ":".join(out)
+
+
 def launchd_jobs(state):
-    times = notify_config(state)["times"]
+    cfg = notify_config(state)
+    times = cfg["times"]
+    env = {"LIFE_REDESIGN_HOME": data_dir(), "HOME": os.path.expanduser("~"),
+           "PATH": launchd_path(cfg)}
     script = os.path.abspath(__file__)
     jobs = []
     for slot in SLOTS:
         argv = [sys.executable, script, "notify", "fire", slot]
         job = {"Label": LAUNCHD_PREFIX + slot,
-               "EnvironmentVariables": {"LIFE_REDESIGN_HOME": data_dir()},
+               "EnvironmentVariables": env,
                "RunAtLoad": False}
         if slot == "random":
             # launchd cannot fire at a random time: tick through the day and
@@ -1530,14 +1552,34 @@ def cmd_notify_launchd(args):
                                stderr=subprocess.DEVNULL)
             with open(j["path"], "wb") as f:
                 f.write(plistlib.dumps(j["job"]))
+    results = []
     for c in cmds:
-        subprocess.run(c, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
+        try:
+            done = subprocess.run(
+                c, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, universal_newlines=True)
+            results.append({"command": c, "returncode": done.returncode,
+                            "stderr": done.stderr.strip()})
+        except OSError as e:
+            results.append({"command": c, "returncode": -1, "stderr": str(e)})
+    out["results"] = results
+    out["failed"] = [r["command"] for r in results if r["returncode"] != 0]
     if action == "uninstall":
         for j in jobs:
             if os.path.isfile(j["path"]):
                 os.remove(j["path"])
+    if not out["failed"]:
+        cfg = notify_config(state)
+        if action == "install":
+            cfg["installed"] = {k: cfg["times"][k] for k in ("morning", "evening")}
+        else:
+            cfg.pop("installed", None)
+        save_state(state)
     emit(out)
+    if out["failed"]:
+        print("error: %d launchctl command(s) failed (see results)"
+              % len(out["failed"]), file=sys.stderr)
+        return 1
 
 
 def main(argv=None):
@@ -1668,11 +1710,10 @@ def main(argv=None):
         q.set_defaults(func=cmd_notify_launchd)
     args = parser.parse_args(argv)
     try:
-        args.func(args)
+        return args.func(args) or 0
     except CliError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
-    return 0
 
 
 if __name__ == "__main__":

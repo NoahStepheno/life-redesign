@@ -470,6 +470,148 @@ def cmd_protocol_answer(args):
           "phase": state["phase"]})
 
 
+# ---- daily check-in and verdicts (PROTOCOL.md section 5.1, 5.3) --------------
+# Self-contained section. Log: log/YYYY-MM-DD.md, append-only (ADR-0001).
+# Tomorrow's levers: levers.jsonl, one appended line per check-in; the last
+# line for a date wins. Streaks/escalation are not handled here.
+VERDICTS = ("在轨", "轻微偏离", "走偏")
+VERDICT_RE = re.compile(r"^- 判定: (.+?)[ \t]*$")
+REVISION_RE = re.compile(r"^- 改判: .+? → (.+?) — 因 ")
+
+
+def log_path(date):
+    return os.path.join(data_dir(), "log", date + ".md")
+
+
+def levers_path():
+    return os.path.join(data_dir(), "levers.jsonl")
+
+
+def saved_levers(date):
+    path = levers_path()
+    found = []
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    rec = json.loads(line)
+                    if rec["date"] == date:
+                        found = rec["levers"]
+    return found
+
+
+def one_line(value, label):
+    value = (value or "").strip()
+    if not value:
+        raise CliError("%s is required and must not be empty" % label)
+    if "\n" in value:
+        raise CliError("%s must be a single line" % label)
+    return value
+
+
+def current_verdict(text):
+    verdict = None
+    for line in text.split("\n"):
+        m = VERDICT_RE.match(line) or REVISION_RE.match(line)
+        if m:
+            verdict = m.group(1)
+    return verdict
+
+
+def append_log(date, block):
+    path = log_path(date)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    existing = ""
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            existing = f.read()
+    if existing:
+        block = ("\n" if existing.endswith("\n") else "\n\n") + block
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(block)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def yes_no(value):
+    return "是" if value == "yes" else "否"
+
+
+def check_verdict(value):
+    verdict = one_line(value, "--verdict")
+    if verdict not in VERDICTS:
+        raise CliError("--verdict must be one of: %s" % " / ".join(VERDICTS))
+    return verdict
+
+
+def cmd_checkin_record(args):
+    require_active()
+    t = now()
+    date = t.date().isoformat()
+    verdict = check_verdict(args.verdict)
+    verdict_reason = one_line(args.verdict_reason, "--verdict-reason")
+    levers = [one_line(x, "--lever") for x in (args.lever or [])]
+    if not levers:
+        levers = saved_levers(date)
+    if not levers:
+        raise CliError("--lever is required (no levers saved for today)")
+    tomorrow = [one_line(x, "--tomorrow-lever") for x in (args.tomorrow_lever or [])]
+    if not tomorrow:
+        raise CliError("--tomorrow-lever is required (set tomorrow's Daily Levers)")
+    done = one_line(args.levers_done, "--levers-done")
+    action_reason = one_line(args.action_reason, "--action-reason")
+    identity_reason = one_line(args.identity_reason, "--identity-reason")
+    toward_reason = one_line(args.toward_reason, "--toward-reason")
+    lines = [
+        "- Daily Levers: %s" % "; ".join(levers),
+        "- 完成情况: %s" % done,
+        "- 行动偏离: %s — %s" % (yes_no(args.action_drift), action_reason),
+        "- 身份保护: %s — %s" % (yes_no(args.identity_protection), identity_reason),
+        "- 靠近反愿景: %s — %s" % (
+            "靠近反愿景" if args.toward == "anti-vision" else "靠近愿景", toward_reason),
+        "- 判定: %s" % verdict,
+        "- 判定理由: %s" % verdict_reason,
+    ]
+    path = log_path(date)
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        head = "## %s 再次打卡" % t.strftime("%H:%M:%S")
+    else:
+        head = "# %s" % date
+    append_log(date, head + "\n" + "\n".join(lines) + "\n")
+    tomorrow_date = (t.date() + datetime.timedelta(days=1)).isoformat()
+    with open(levers_path(), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"date": tomorrow_date, "levers": tomorrow,
+                            "set_at": t.isoformat()}, ensure_ascii=False) + "\n")
+    emit({"date": date, "file": "log/%s.md" % date, "verdict": verdict,
+          "tomorrow_date": tomorrow_date, "tomorrow_levers": tomorrow})
+
+
+def cmd_checkin_revise(args):
+    require_active()
+    t = now()
+    date = t.date().isoformat()
+    fact = one_line(args.new_fact, "--new-fact (a new fact is required to revise a verdict)")
+    verdict = check_verdict(args.verdict)
+    path = log_path(date)
+    previous = None
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            previous = current_verdict(f.read())
+    if previous is None:
+        raise CliError("no check-in recorded today: nothing to revise")
+    append_log(date, "- 改判: %s → %s — 因 %s 事实改判 (%s)\n"
+               % (previous, verdict, fact, t.strftime("%H:%M:%S")))
+    emit({"date": date, "previous": previous, "verdict": verdict})
+
+
+def cmd_checkin_levers(args):
+    load_state()
+    date = args.date or now().date().isoformat()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        raise CliError("--date must be YYYY-MM-DD")
+    emit({"date": date, "levers": saved_levers(date)})
+
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
@@ -511,6 +653,29 @@ def main(argv=None):
     q = psub.add_parser("confirm-feeling")
     q.add_argument("feeling", choices=["fresh", "faded"])
     q.set_defaults(func=cmd_protocol_confirm)
+    p = sub.add_parser("checkin", help="nightly check-in, verdict revision, levers")
+    csub = p.add_subparsers(dest="checkin_command")
+    csub.required = True
+    q = csub.add_parser("record")
+    q.add_argument("--lever", action="append")
+    q.add_argument("--levers-done")
+    q.add_argument("--action-drift", choices=["yes", "no"], required=True)
+    q.add_argument("--action-reason")
+    q.add_argument("--identity-protection", choices=["yes", "no"], required=True)
+    q.add_argument("--identity-reason")
+    q.add_argument("--toward", choices=["anti-vision", "vision"], required=True)
+    q.add_argument("--toward-reason")
+    q.add_argument("--verdict")
+    q.add_argument("--verdict-reason")
+    q.add_argument("--tomorrow-lever", action="append")
+    q.set_defaults(func=cmd_checkin_record)
+    q = csub.add_parser("revise-verdict")
+    q.add_argument("--new-fact")
+    q.add_argument("--verdict")
+    q.set_defaults(func=cmd_checkin_revise)
+    q = csub.add_parser("levers")
+    q.add_argument("--date")
+    q.set_defaults(func=cmd_checkin_levers)
     args = parser.parse_args(argv)
     try:
         args.func(args)

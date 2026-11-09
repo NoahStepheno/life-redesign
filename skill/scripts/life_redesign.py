@@ -269,17 +269,41 @@ def cmd_append(args):
     emit({"target": target, "date": versions[-1]["date"], "versions": len(versions)})
 
 
-def write_version(path, body):
+def append_entry(path, entry, blank_line=True, sync=False):
+    """The one append primitive: add `entry` to the end of `path`.
+
+    Existing bytes are never rewritten (mode "a"); only a separator is added
+    in front of the new entry. blank_line=True separates entries with a blank
+    line (and adds none when the file is empty or whitespace-only);
+    blank_line=False only guarantees the entry starts on a fresh line.
+    sync=True fsyncs before returning. Returns the previous file text.
+    """
     existing = ""
     if os.path.isfile(path):
         with open(path, encoding="utf-8") as f:
             existing = f.read()
-    entry = "## %s\n%s\n" % (now().date().isoformat(), body)
-    if existing.strip():
-        # Separator only; existing bytes are never rewritten (mode "a").
-        entry = ("\n" if existing.endswith("\n") else "\n\n") + entry
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if blank_line:
+        if existing.strip():
+            entry = ("\n" if existing.endswith("\n") else "\n\n") + entry
+    elif existing and not existing.endswith("\n"):
+        entry = "\n" + entry
     with open(path, "a", encoding="utf-8") as f:
         f.write(entry)
+        if sync:
+            f.flush()
+            os.fsync(f.fileno())
+    return existing
+
+
+def write_version(path, body):
+    append_entry(path, "## %s\n%s\n" % (now().date().isoformat(), body))
+
+
+def goals_text(sections):
+    """Render goals sections (title -> body) in canonical order."""
+    return "\n\n".join("### %s\n%s" % (t, sections[t])
+                        for t, _ in ALL_GOAL_SECTIONS if t in sections)
 
 
 def goals_body(given):
@@ -287,8 +311,7 @@ def goals_body(given):
     versions = read_versions("goals")
     merged = dict(versions[-1]["sections"]) if versions else {}
     merged.update(given)
-    return "\n\n".join("### %s\n%s" % (t, merged[t])
-                       for t, _ in ALL_GOAL_SECTIONS if t in merged)
+    return goals_text(merged)
 
 
 def cmd_show(args):
@@ -470,13 +493,7 @@ def cmd_apply_block(args):
         elif item["kind"] != "log":
             write_version(full, item["body"])
         else:
-            existing = ""
-            if os.path.isfile(full):
-                with open(full, encoding="utf-8") as f:
-                    existing = f.read()
-            sep = "\n" if existing and not existing.endswith("\n") else ""
-            with open(full, "a", encoding="utf-8") as f:
-                f.write(sep + item["body"] + "\n")
+            append_entry(full, item["body"] + "\n", blank_line=False)
     emit({"applied": [{"file": b["file"], "mode": b["mode"]} for b in blocks]})
 # ---- plan: change vision / anti-vision / goals sections (PROTOCOL.md s.6) ----
 # object -> (append target, goals section title or None)
@@ -506,22 +523,13 @@ def cmd_plan_change(args):
         merged = dict(current["sections"]) if current else {}
         old = merged.get(section)
         merged[section] = text
-        body = "\n\n".join("### %s\n%s" % (t, merged[t])
-                           for t, _ in ALL_GOAL_SECTIONS if t in merged)
+        body = goals_text(merged)
     else:
         old = current["content"] if current else None
         body = text
     path = os.path.join(data_dir(), APPEND_TARGETS[target])
-    existing = ""
-    if os.path.isfile(path):
-        with open(path, encoding="utf-8") as f:
-            existing = f.read()
     date = now().date().isoformat()
-    entry = "## %s\n%s\n_Reason: %s_\n" % (date, body, why)
-    if existing.strip():
-        entry = ("\n" if existing.endswith("\n") else "\n\n") + entry
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(entry)
+    append_entry(path, "## %s\n%s\n_Reason: %s_\n" % (date, body, why))
     emit({"object": args.object, "date": date, "old": old, "new": text,
           "why": why, "versions": len(read_versions(target))})
 
@@ -717,17 +725,7 @@ def cmd_protocol_answer(args):
     name = segment_file(state)
     os.makedirs(protocol_dir(), exist_ok=True)
     path = os.path.join(protocol_dir(), name)
-    existing = ""
-    if os.path.isfile(path):
-        with open(path, encoding="utf-8") as f:
-            existing = f.read()
-    entry = "## %s\n%s\n" % (qid, body)
-    if existing.strip():
-        entry = ("\n" if existing.endswith("\n") else "\n\n") + entry
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(entry)
-        f.flush()
-        os.fsync(f.fileno())
+    append_entry(path, "## %s\n%s\n" % (qid, body), sync=True)
     i = QUESTIONS.index(qid)
     p["last_activity"] = now().isoformat()
     if i + 1 < len(QUESTIONS):
@@ -795,18 +793,7 @@ def current_verdict(text):
 
 
 def append_log(date, block):
-    path = log_path(date)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    existing = ""
-    if os.path.isfile(path):
-        with open(path, encoding="utf-8") as f:
-            existing = f.read()
-    if existing:
-        block = ("\n" if existing.endswith("\n") else "\n\n") + block
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(block)
-        f.flush()
-        os.fsync(f.fileno())
+    append_entry(log_path(date), block, sync=True)
 
 
 def yes_no(value):
@@ -1151,16 +1138,9 @@ def cmd_review_save(args):
         raise CliError("--period must be %s"
                        % ("YYYY-MM" if args.kind == "month" else "YYYY"))
     path = os.path.join(data_dir(), "reviews.md")
-    existing = ""
-    if os.path.isfile(path):
-        with open(path, encoding="utf-8") as f:
-            existing = f.read()
     entry = "## %s %s %s\n%s\n" % (today.isoformat(), REVIEW_KINDS[args.kind],
                                    period, text)
-    if existing.strip():
-        entry = ("\n" if existing.endswith("\n") else "\n\n") + entry
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(entry)
+    existing = append_entry(path, entry)
     emit({"kind": args.kind, "period": period, "date": today.isoformat(),
           "file": "reviews.md",
           "reviews": len(re.findall(r"(?m)^## ", existing + entry))})

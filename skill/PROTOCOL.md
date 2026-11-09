@@ -31,7 +31,7 @@
 
 规则:
 
-- `phase != active` 时**不启动日常推送**,`checkin` 与 `review` 提示用户先 `start`。
+- `phase != active` 时**不启动日常推送**,`checkin` 与 `review` 提示用户先运行 `protocol resume`(开始或续做一天协议)。
 - `start` 只做一次。`phase == active` 时,只有用户明确要求重做,或年复盘时用户同意,才允许再次进入(见第 4.5 节)。
 
 `state.json` 字段(机器状态,不放思考内容):
@@ -46,6 +46,19 @@
   "privacy_ack": false
 }
 ```
+
+上面是 `init` 写入的初始值。运行中 CLI 还会按需增加这些字段(都由 CLI 维护,不要手改):
+
+| 字段 | 含义 |
+|---|---|
+| `protocol.last_activity` / `files` / `redo` | 协议最近活动时间(用于 7 天搁置)、当前片段的文件名、是否处于"重做" |
+| `streak_cursor` | 已结算到的最后一天;之后、今天之前的天数在下次交互时补记未记录 |
+| `activated_on` | 协议完成(进入 `active`)的日期,复盘以此为起点 |
+| `escalation` | 是否已升级(drift 或 unrecorded 达到 3) |
+| `notify.show_user_text` | 推送是否可显示用户原文(默认 `false`) |
+| `notify.ai` | 晚间提醒是否用 AI 生成文案(默认 `false`) |
+| `notify.sent` | 各推送位最近一次实际发送的日期(`--tick` 据此去重) |
+| `notify.installed` | 安装 launchd 任务时的 morning/evening 时间;与当前配置不同则 `notify config` 报告 `reinstall_required` |
 
 ---
 
@@ -169,7 +182,7 @@
 
 ### 4.4 中断恢复
 
-- 每题落盘。进入 `start` 时先读 `state.json.protocol`,从断点继续。
+- 每题落盘。进入 `start`(`protocol resume`)时先读 `state.json.protocol`,从断点继续。
 - **当天内**:直接继续。
 - **隔了夜**:先问"那天的感受还在吗?"。用户说已淡去 → 该段作废(移入 `protocol/` 的 `.discarded` 记录,不删除),从头重做。
 - **超过 7 天未完成**:`phase = protocol_shelved`;下次进入时旧答案标记归档,重新开始。
@@ -182,7 +195,7 @@
 
 ## 5. `checkin` — 每晚打卡
 
-前置:`phase == active`。若今天是勿扰日,告知并跳过,不计未记录。
+前置:`phase == active`。若今天是勿扰日,则今天**不要求**打卡,也永远不计未记录;用户自愿打卡仍然允许(照常记录)。
 
 ### 5.1 流程
 

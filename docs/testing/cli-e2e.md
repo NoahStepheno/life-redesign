@@ -14,7 +14,7 @@
 python3 -m unittest discover
 ```
 
-- 当前共 172 个测试,完整运行约 5 分钟(实测 321 秒,多数时间花在反复启动 CLI 子进程)。
+- 当前共 179 个测试,完整运行约 6 分钟(实测 353 秒,多数时间花在反复启动 CLI 子进程)。
 - 迭代时只跑一个模块、一个类或一个用例(实测分别约 54 秒、13 秒、3 秒;`test_init` 约 2 秒):
 
 ```sh
@@ -300,11 +300,43 @@ error: protocol already complete; use `protocol redo` to redo it explicitly
 2026-01-20.md
 ```
 
-注意:回答只写进 `protocol/` 目录。Anti-vision、Vision、Year Goal 等**不会**被协议命令自动写出,要由下一节的 `append` 写入(用户给措辞)。
+答完最后一题的那一刻,CLI 把用户的原话原样写成第一版计划文件(Anti-vision ← 3.3,Vision ← 3.4 加 1.13 的身份宣言,Year Goal / Month Project / Daily Levers / Constraints ← 3.5 / 3.6 / 3.7 / 3.constraints),并带来源标记 `_Reason: 来自一天协议_`;几个文件要么全部写入要么全部不写。快照此时已非空:
+
+```sh
+cat "$LIFE_REDESIGN_HOME/anti-vision.md"
+cat "$LIFE_REDESIGN_HOME/vision.md"
+cat "$LIFE_REDESIGN_HOME/goals.md"
+lr show vision
+```
+
+```output
+## 2026-01-20
+第三部分答案 3.3
+_Reason: 来自一天协议_
+## 2026-01-20
+第三部分答案 3.4
+
+Identity Statement: 第一部分答案 1.13
+_Reason: 来自一天协议_
+## 2026-01-20
+### Year Goal
+第三部分答案 3.5
+
+### Month Project
+第三部分答案 3.6
+
+### Constraints
+不牺牲睡眠和家人时间。
+
+### Daily Levers
+第三部分答案 3.7
+_Reason: 来自一天协议_
+{"target": "vision", "current": {"date": "2026-01-20", "reason": "来自一天协议", "content": "第三部分答案 3.4\n\nIdentity Statement: 第一部分答案 1.13"}, "versions": [{"date": "2026-01-20", "reason": "来自一天协议", "content": "第三部分答案 3.4\n\nIdentity Statement: 第一部分答案 1.13"}]}
+```
 
 ### 3.7 追加式保护:`append` 与 `plan`
 
-三个文件(Anti-vision、Vision、目标)每次写入都追加一个带日期的新版本,当前版本是最后一段。
+三个文件(Anti-vision、Vision、目标)每次写入都追加一个带日期的新版本,当前版本是最后一段。协议完成时已经写下了第一版(见上一节),下面的 `append` 是在其后继续追加。
 
 ```sh
 clock 2026-01-20T10:00:00
@@ -317,16 +349,20 @@ lr show anti-vision
 ```
 
 ```output
-{"target": "anti-vision", "date": "2026-01-20", "versions": 1}
-{"target": "vision", "date": "2026-01-20", "versions": 1}
-{"target": "goals", "date": "2026-01-20", "versions": 1}
 {"target": "anti-vision", "date": "2026-01-20", "versions": 2}
+{"target": "vision", "date": "2026-01-20", "versions": 2}
+{"target": "goals", "date": "2026-01-20", "versions": 2}
+{"target": "anti-vision", "date": "2026-01-20", "versions": 3}
+## 2026-01-20
+第三部分答案 3.3
+_Reason: 来自一天协议_
+
 ## 2026-01-20
 五年后的周二:我在同一张桌子前醒来,依然拖延,依然孤独。
 
 ## 2026-01-20
 (第二版)十年后我仍在原地,没有人记得我做过什么。
-{"target": "anti-vision", "current": {"date": "2026-01-20", "content": "(第二版)十年后我仍在原地,没有人记得我做过什么。"}, "versions": [{"date": "2026-01-20", "content": "五年后的周二:我在同一张桌子前醒来,依然拖延,依然孤独。"}, {"date": "2026-01-20", "content": "(第二版)十年后我仍在原地,没有人记得我做过什么。"}]}
+{"target": "anti-vision", "current": {"date": "2026-01-20", "content": "(第二版)十年后我仍在原地,没有人记得我做过什么。"}, "versions": [{"date": "2026-01-20", "reason": "来自一天协议", "content": "第三部分答案 3.3"}, {"date": "2026-01-20", "content": "五年后的周二:我在同一张桌子前醒来,依然拖延,依然孤独。"}, {"date": "2026-01-20", "content": "(第二版)十年后我仍在原地,没有人记得我做过什么。"}]}
 ```
 
 CLI 没有任何改写或删除能力。试图用这类动词或开关,会被拒绝,并说明原因(下面三条的错误信息相同,只是第一个词不同):
@@ -388,7 +424,7 @@ cat "$LIFE_REDESIGN_HOME/goals.md"
 ```
 
 ```output
-{"object": "daily-levers", "date": "2026-01-20", "old": null, "new": "写 500 字\n跑步 20 分钟", "why": "初始杠杆", "versions": 2}
+{"object": "daily-levers", "date": "2026-01-20", "old": "第三部分答案 3.7", "new": "写 500 字\n跑步 20 分钟", "why": "初始杠杆", "versions": 3}
 error: --why is required: say why this is changing
 [exit 1]
 error: --text is required
@@ -399,6 +435,20 @@ life_redesign plan change: error: argument object: invalid choice: 'delete' (cho
 [exit 2]
 ## 2026-01-20
 ### Year Goal
+第三部分答案 3.5
+
+### Month Project
+第三部分答案 3.6
+
+### Constraints
+不牺牲睡眠和家人时间。
+
+### Daily Levers
+第三部分答案 3.7
+_Reason: 来自一天协议_
+
+## 2026-01-20
+### Year Goal
 年底前发布第一个付费产品
 
 ### Month Project
@@ -406,6 +456,9 @@ life_redesign plan change: error: argument object: invalid choice: 'delete' (cho
 
 ### Constraints
 不牺牲睡眠和家人时间
+
+### Daily Levers
+第三部分答案 3.7
 
 ## 2026-01-20
 ### Year Goal
@@ -668,10 +721,10 @@ lr review month --month 2026-13
 ```
 
 ```output
-{"object": "month-project", "date": "2026-01-31", "old": "完成产品原型", "new": "把原型给 3 个人看并收集反馈", "why": "原型不给人看没有反馈", "versions": 3}
+{"object": "month-project", "date": "2026-01-31", "old": "完成产品原型", "new": "把原型给 3 个人看并收集反馈", "why": "原型不给人看没有反馈", "versions": 4}
 {"date": "2026-01-31", "file": "log/2026-01-31.md", "verdict": "轻微偏离", "tomorrow_date": "2026-02-01", "tomorrow_levers": ["写 500 字", "跑步 20 分钟"]}
-{"object": "year-goal", "date": "2026-02-01", "old": "年底前发布第一个付费产品", "new": "年底前拿到第一个付费用户", "why": "发布产品的范围太大", "versions": 4}
-{"kind": "month", "month": "2026-01", "days_in_period": 31, "days_in_scope": 10, "counts": {"on_track": 3, "minor_drift": 1, "drifted": 3, "unrecorded": 3}, "dnd_days": ["2026-01-26"], "excluded": {"before_activation": 20, "future_or_today_pending": 0, "dnd": 1}, "plan_changes": [{"object": "anti-vision", "date": "2026-01-20", "reason": null}, {"object": "goals", "date": "2026-01-20", "reason": "初始杠杆", "sections": ["Daily Levers"]}, {"object": "goals", "date": "2026-01-31", "reason": "原型不给人看没有反馈", "sections": ["Month Project"]}], "plan_unchanged": false, "plan_message": null}
+{"object": "year-goal", "date": "2026-02-01", "old": "年底前发布第一个付费产品", "new": "年底前拿到第一个付费用户", "why": "发布产品的范围太大", "versions": 5}
+{"kind": "month", "month": "2026-01", "days_in_period": 31, "days_in_scope": 10, "counts": {"on_track": 3, "minor_drift": 1, "drifted": 3, "unrecorded": 3}, "dnd_days": ["2026-01-26"], "excluded": {"before_activation": 20, "future_or_today_pending": 0, "dnd": 1}, "plan_changes": [{"object": "anti-vision", "date": "2026-01-20", "reason": null}, {"object": "anti-vision", "date": "2026-01-20", "reason": null}, {"object": "goals", "date": "2026-01-20", "reason": null, "sections": ["Year Goal", "Month Project", "Constraints"]}, {"object": "goals", "date": "2026-01-20", "reason": "初始杠杆", "sections": ["Daily Levers"]}, {"object": "vision", "date": "2026-01-20", "reason": null}, {"object": "goals", "date": "2026-01-31", "reason": "原型不给人看没有反馈", "sections": ["Month Project"]}], "plan_unchanged": false, "plan_message": null}
 error: --month must be YYYY-MM
 [exit 1]
 ```
@@ -696,7 +749,7 @@ usage: life_redesign review save [-h] --kind {month,year} [--period PERIOD]
                                  [--text TEXT]
 life_redesign review save: error: argument --kind: invalid choice: 'quarter' (choose from 'month', 'year')
 [exit 2]
-{"kind": "year", "year": 2026, "days_in_period": 365, "days_in_scope": 10, "counts": {"on_track": 3, "minor_drift": 1, "drifted": 3, "unrecorded": 3}, "dnd_days": ["2026-01-26"], "excluded": {"before_activation": 20, "future_or_today_pending": 334, "dnd": 1}, "year_goal_history": [{"date": "2026-01-20", "text": "年底前发布第一个付费产品", "reason": null}, {"date": "2026-02-01", "text": "年底前拿到第一个付费用户", "reason": "发布产品的范围太大"}], "plan_changes": [{"object": "anti-vision", "date": "2026-01-20", "reason": null}, {"object": "goals", "date": "2026-01-20", "reason": "初始杠杆", "sections": ["Daily Levers"]}, {"object": "goals", "date": "2026-01-31", "reason": "原型不给人看没有反馈", "sections": ["Month Project"]}, {"object": "goals", "date": "2026-02-01", "reason": "发布产品的范围太大", "sections": ["Year Goal"]}], "offer_redo_protocol": true}
+{"kind": "year", "year": 2026, "days_in_period": 365, "days_in_scope": 10, "counts": {"on_track": 3, "minor_drift": 1, "drifted": 3, "unrecorded": 3}, "dnd_days": ["2026-01-26"], "excluded": {"before_activation": 20, "future_or_today_pending": 334, "dnd": 1}, "year_goal_history": [{"date": "2026-01-20", "text": "第三部分答案 3.5", "reason": "来自一天协议"}, {"date": "2026-01-20", "text": "年底前发布第一个付费产品", "reason": null}, {"date": "2026-02-01", "text": "年底前拿到第一个付费用户", "reason": "发布产品的范围太大"}], "plan_changes": [{"object": "anti-vision", "date": "2026-01-20", "reason": null}, {"object": "anti-vision", "date": "2026-01-20", "reason": null}, {"object": "goals", "date": "2026-01-20", "reason": null, "sections": ["Year Goal", "Month Project", "Constraints"]}, {"object": "goals", "date": "2026-01-20", "reason": "初始杠杆", "sections": ["Daily Levers"]}, {"object": "vision", "date": "2026-01-20", "reason": null}, {"object": "goals", "date": "2026-01-31", "reason": "原型不给人看没有反馈", "sections": ["Month Project"]}, {"object": "goals", "date": "2026-02-01", "reason": "发布产品的范围太大", "sections": ["Year Goal"]}], "offer_redo_protocol": true}
 ## 2026-02-01 月复盘 2026-01
 本月最大偏离是 1 月 21 至 23 日连续走偏,原因是身份保护。
 ```

@@ -88,9 +88,9 @@ class PlanChangeTest(PlanTestCase):
         self.assertEqual(cur["content"], "n")
         self.assertEqual(cur["reason"], "w")
 
-    def test_first_change_has_null_old(self):
+    def test_first_change_old_is_protocol_first_version(self):
         out = self.plan("vision").json()
-        self.assertIsNone(out["old"])
+        self.assertEqual(out["old"], "a\n\nIdentity Statement: a")
 
     def test_all_six_objects_changeable(self):
         for obj in OBJECTS:
@@ -128,7 +128,9 @@ class PlanChangeTest(PlanTestCase):
         self.run_cli("append", "goals", "--year-goal", "Y")
         cur = self.run_cli("show", "goals").json()["current"]
         self.assertEqual(cur["sections"],
-                         {"Year Goal": "Y", "Daily Levers": "walk"})
+                         {"Year Goal": "Y", "Month Project": "a",
+                          "Constraints": "a",
+                          "Daily Levers": "walk"})
         self.assertNotIn("reason", cur)
 
     def test_forged_headings_rejected(self):

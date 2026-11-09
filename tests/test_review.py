@@ -112,7 +112,7 @@ class YearTest(ReviewTestCase):
         self.assertEqual(r["counts"]["drifted"], 1)
         self.assertEqual(sum(r["counts"].values()), r["days_in_scope"])
         hist = r["year_goal_history"]
-        self.assertEqual(len(hist), 2)
+        self.assertEqual(len(hist), 3)  # protocol's first version + two changes
         self.assertIn("第二版年目标", hist[-1]["text"])
         self.assertEqual(hist[-1]["reason"], "改")
         self.assertTrue(r["offer_redo_protocol"])

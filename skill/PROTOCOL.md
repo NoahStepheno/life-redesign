@@ -53,8 +53,8 @@ EOF
 | `protocol status` / `resume` / `redo` / `gate` | 一天协议的进度、开始或续做、重做、门禁检查 |
 | `protocol answer <题号> --text "..."` | 记录一题答案并推进进度 |
 | `protocol confirm-feeling fresh\|faded` | 隔夜回来后确认那天的感受 |
-| `append anti-vision\|vision --text "..."` | 追加新版本(仅用于一天协议产出第一版) |
-| `append goals [--year-goal ..] [--month-project ..] [--constraints ..]` | 追加 goals 新版本(仅用于一天协议;未给的小节沿用上一版) |
+| `append anti-vision\|vision --text "..."` | 追加新版本(第一版由 `protocol answer` 自动写入,无需手动) |
+| `append goals [--year-goal ..] [--month-project ..] [--constraints ..]` | 追加 goals 新版本(未给的小节沿用上一版) |
 | `show anti-vision\|vision\|goals` | 查看全部版本,当前版本 = `current` |
 | `plan change <对象> --text "..." --why "..."` | 修改计划(追加新版本并记录原因) |
 | `checkin levers [--date YYYY-MM-DD]` | 读某天的 Daily Levers(默认今天) |
@@ -258,16 +258,15 @@ _Reason: <修改原因>_
 
 ### 5.5 把第一版写入计划文件
 
-`protocol answer` 只记录答案,不会生成 `anti-vision.md` / `vision.md` / `goals.md`。这些第一版由你用 `append` 写入,**措辞由用户给出**:把综合稿念给用户,由用户确认或亲自改写;`--text` 里是用户确认的原话。
+回答最后一题 `3.constraints` 的那一刻,CLI 自动把用户的原话**原样**写成第一版计划文件,不改写、不合成,你不参与措辞,也不需要手动 `append`:
 
-| 何时 | 命令 | 内容 |
-|---|---|---|
-| 答完 3.3 后 | `LR append anti-vision --text "..."` | 用户确认的、对 1.5–1.11 的综合(含 3.3 那句话) |
-| 答完 3.4 后 | `LR append vision --text "..."` | 1.12 的愿景、1.13 的 Identity Statement(同一版本内,用一行 `Identity Statement: ...` 标出)、3.4 那句话 |
-| 回答 3.constraints 之前 | `LR append goals --year-goal "<3.5>" --month-project "<3.6>" --constraints "<用户的答案>"` | 然后再 `protocol answer 3.constraints` |
-| 协议完成之后 | `LR plan change daily-levers --text "<3.7>" --why "一天协议的第一版"` | Daily Levers 只能通过 `plan change` 写入,而 `plan` 要求协议已完成 |
+| 来源 | 写入 |
+|---|---|
+| 3.3(压缩的反愿景一句话) | `anti-vision.md` |
+| 3.4(愿景 MVP 一句话)+ 1.13 的身份宣言 | `vision.md`(3.4 之后另起一行 `Identity Statement: <1.13>`) |
+| 3.5 / 3.6 / 3.7 / 3.constraints | `goals.md` 的 Year Goal / Month Project / Daily Levers / Constraints |
 
-这些写入之间若中断,续做时先用 `LR show anti-vision|vision|goals` 检查哪些还缺,补上缺的,不要重复写。完成后告知用户可通过 `notify` 安装推送。
+第一版末尾带固定来源标记 `_Reason: 来自一天协议_`(重做则为 `_Reason: 来自重做的一天协议_`),因此不会被误认为没有原因的修改,之后可正常 `plan change`。几个文件要么全部写入,要么全部不写(写入失败则报错、不进入 `active`,答案也不记录,修好后重答最后一题即可)。完成后告知用户可通过 `notify` 安装推送。
 
 ### 5.6 中断恢复
 
@@ -285,7 +284,7 @@ _Reason: <修改原因>_
 
 - 不是 `active` 时报错:`redo needs a completed protocol (phase active); use `protocol resume``。已经在重做中报错:`a redo is already in progress; use `protocol resume``。
 - 重做期间 `checkin` / `plan` / `review` 仍可用;7 天未完成则重做片段被归档,`phase` 仍是 `active`,旧计划不受影响。
-- 重做的结果通过 `append` **追加**为新版本(同 5.5 的各项,但 Daily Levers 也用 `plan change`)。完成后用 `show` 取出新旧版本,做对比追问:"你上一版最怕的是 X,现在是 Y,发生了什么?"。整体归档由用户手动改目录名。
+- 重做走完最后一题时,CLI 把结果**追加**为新版本(同 5.5,来源标记为"来自重做的一天协议"),旧版本逐字节不变。完成后用 `show` 取出新旧版本,做对比追问:"你上一版最怕的是 X,现在是 Y,发生了什么?"。整体归档由用户手动改目录名。
 
 ---
 
@@ -471,7 +470,7 @@ CLI 对更新块的规则(违反则整批拒绝,什么都不写,先全部校验�
 
 | 入口 | 前置 | 主要命令 | 产出 |
 |---|---|---|---|
-| `start` | `phase` ∈ {new, protocol_in_progress, protocol_shelved},或已 active 且用户要求重做 | `protocol status/resume/redo/answer/confirm-feeling`、`append`、`plan change daily-levers` | 第一版全部计划 |
+| `start` | `phase` ∈ {new, protocol_in_progress, protocol_shelved},或已 active 且用户要求重做 | `protocol status/resume/redo/answer/confirm-feeling` | 第一版全部计划(答完最后一题时 CLI 自动写入) |
 | `checkin` | `phase == active` | `show`、`checkin levers/record/revise-verdict`、`streak status` | 当日日志 + 判定 + 次日 Levers |
 | `review` | `phase == active` | `review month/year/save`、`show goals`、`plan change` | 月/年复盘结论 + 新 Month Project / Year Goal |
 | `plan` | `phase == active` | `show`、`plan change` | 计划新版本 |

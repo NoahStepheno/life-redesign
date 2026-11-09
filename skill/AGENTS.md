@@ -27,7 +27,7 @@ python3 "<skill_dir>/scripts/life_redesign.py" <命令> [参数]
 
 | 入口 | 主要命令(详见 PROTOCOL 对应章节) |
 |---|---|
-| `start`(第 5 节) | `LR protocol status` / `resume` / `redo`;`LR protocol answer <题号> --text "<原话>"`(题号 1.1–1.14、3.1–3.7、3.constraints,按序);`LR protocol confirm-feeling fresh\|faded`;`LR append anti-vision\|vision --text`、`LR append goals --year-goal/--month-project/--constraints`、`LR plan change daily-levers --text --why` |
+| `start`(第 5 节) | `LR protocol status` / `resume` / `redo`;`LR protocol answer <题号> --text "<原话>"`(题号 1.1–1.14、3.1–3.7、3.constraints,按序);`LR protocol confirm-feeling fresh\|faded`(答完最后一题时 CLI 自动把用户原话写成第一版计划文件,见 PROTOCOL 5.5) |
 | `checkin`(第 6 节) | `LR show anti-vision\|vision\|goals`;`LR checkin levers`;`LR streak status`;`LR checkin record --lever --levers-done --action-drift --action-reason --identity-protection --identity-reason --toward --toward-reason --verdict --verdict-reason --tomorrow-lever [--while-away]`;`LR checkin revise-verdict --new-fact --verdict` |
 | `review`(第 8 节) | `LR review month` / `year`;`LR review save --kind month\|year --text`;`LR plan change ...` |
 | `plan`(第 7 节) | `LR show ...`;`LR plan change <vision\|anti-vision\|year-goal\|month-project\|daily-levers\|constraints> --text --why` |

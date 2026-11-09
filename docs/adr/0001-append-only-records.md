@@ -11,3 +11,4 @@ Vision、Anti-vision、Year Goal、Month Project、Constraints 以及每日 Verd
 
 - 文件会随时间变长,但数据量很小,可接受。
 - skill 不提供删除能力;归档由用户手动改目录名完成。
+- 澄清边界:CLI 自身永不删除、也不改写任何内容。唯一会改动文件名的情形,是一日协议(One-day Protocol)的片段在两种已定义的场合被**标记**(重命名为 `.archived.md` / `.discarded.md`,内容原样保留):协议超过 7 天未完成而搁置,或隔夜后用户确认感觉已淡去(`confirm-feeling faded`)。整个数据目录的归档仍由用户手动完成。

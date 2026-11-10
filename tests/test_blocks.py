@@ -47,10 +47,10 @@ class SnapshotTest(CliTestCase):
         self.assertEqual(out["streak"], {"drift": 2, "unrecorded": 1, "escalation": False})
 
 
-class ApplyBlockTest(CliTestCase):
+class ApplyBlockTest(ActiveCliTestCase):
     def setUp(self):
-        super().setUp()
-        self.run_cli("init")
+        super().setUp()  # protocol completed on 2026-01-15
+        self.set_now("2026-01-16T09:00:00")  # day after completion: no silence
 
     def apply(self, text):
         return CliResult(subprocess.run(
@@ -78,19 +78,19 @@ class ApplyBlockTest(CliTestCase):
         self.assertEqual(self.read_data("log", "2026-01-16.md"), "orig\nmore\n")
 
     def test_append_vision_adds_dated_version(self):
-        self.run_cli("append", "vision", "--text", "old")
+        before = self.read_data("vision.md")
         self.set_now("2026-04-02T09:00:00")
         r = self.apply(block("vision.md", "append", "new\n_Reason: why_"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.read_data("vision.md"),
-                         "## 2026-01-15\nold\n\n## 2026-04-02\nnew\n_Reason: why_\n")
+                         before + "\n## 2026-04-02\nnew\n_Reason: why_\n")
 
     def test_append_goals_merges_sections(self):
-        self.run_cli("append", "goals", "--year-goal", "YG", "--constraints", "C")
         r = self.apply(block("goals.md", "append", "### Month Project\nMP\n_Reason: r_"))
         self.assertEqual(r.returncode, 0, r.stderr)
         cur = self.run_cli("show", "goals").json()["current"]["sections"]
-        self.assertEqual(cur, {"Year Goal": "YG", "Month Project": "MP", "Constraints": "C"})
+        self.assertEqual(cur["Month Project"], "MP")
+        self.assertEqual(cur["Constraints"], "a 3.constraints")
 
     def test_replace_and_delete_rejected(self):
         self.write_data("orig\n", "log", "2026-01-16.md")
@@ -140,15 +140,15 @@ class ApplyBlockTest(CliTestCase):
         r = self.apply(text)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.read_data("log", "2026-01-16.md"), "a\n")
-        self.assertEqual(self.read_data("vision.md"), "## 2026-01-15\nv\n_Reason: r_\n")
+        self.assertTrue(self.read_data("vision.md").endswith("## 2026-01-16\nv\n_Reason: r_\n"))
 
     def test_reads_from_file(self):
         p = os.path.join(self._tmp, "blk.txt")
         with open(p, "w", encoding="utf-8") as f:
-            f.write(block("log/x.md", "create", "hi"))
+            f.write(block("log/2026-01-16.md", "create", "hi"))
         r = self.run_cli("apply-block", "--file", p)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(self.read_data("log", "x.md"), "hi\n")
+        self.assertEqual(self.read_data("log", "2026-01-16.md"), "hi\n")
 
 
 class SnapshotRealDataTest(ActiveCliTestCase):
@@ -190,10 +190,11 @@ class VerdictBlockTest(ActiveCliTestCase):
             env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True))
 
-    def verdict_block(self, day, verdict, mode="create", reason="x"):
+    def verdict_block(self, day, verdict, mode="create", reason="x", away=None):
         head = "# 2026-01-%02d\n" % day if mode == "create" else ""
+        tail = "\n- 这几天发生了什么: %s" % away if away else ""
         return block("log/2026-01-%02d.md" % day, mode,
-                     head + "- 判定: %s\n- 判定理由: %s" % (verdict, reason))
+                     head + "- 判定: %s\n- 判定理由: %s%s" % (verdict, reason, tail))
 
     def cli_checkin(self, day, verdict):
         self.set_now("2026-01-%02dT21:00:00" % day)
@@ -208,7 +209,8 @@ class VerdictBlockTest(ActiveCliTestCase):
 
     def test_drift_via_block_counts_and_returns_streak(self):
         self.set_now("2026-01-18T09:00:00")
-        text = "".join(self.verdict_block(d, "走偏") for d in (15, 16, 17))
+        text = "".join(self.verdict_block(d, "走偏", away="忙" if d == 15 else None)
+                       for d in (15, 16, 17))
         r = self.apply(text)
         self.assertEqual(r.returncode, 0, r.stderr)
         streak = r.json()["streak"]
@@ -224,7 +226,8 @@ class VerdictBlockTest(ActiveCliTestCase):
         # the same facts through update blocks in a fresh data dir
         self.setUp()
         self.set_now("2026-01-17T21:00:00")
-        r = self.apply("".join(self.verdict_block(d, "走偏") for d in (15, 16, 17)))
+        r = self.apply("".join(self.verdict_block(d, "走偏", away="忙" if d == 15 else None)
+                               for d in (15, 16, 17)))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.json()["streak"], via_cli)
         self.assertEqual(self.run_cli("streak", "status").json(), via_cli)
@@ -307,7 +310,7 @@ class VerdictBlockTest(ActiveCliTestCase):
         s = self.run_cli("streak", "status").json()
         self.assertEqual(s["unrecorded"], 3)
         self.assertTrue(s["escalation"])
-        r = self.apply(self.verdict_block(18, "在轨", mode="append"))
+        r = self.apply(self.verdict_block(18, "在轨", mode="append", away="出差"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.json()["streak"]["unrecorded"], 0)
         self.assertFalse(r.json()["streak"]["escalation"])
@@ -317,9 +320,173 @@ class VerdictBlockTest(ActiveCliTestCase):
         self.cli_checkin(15, "在轨")
         self.set_now("2026-01-19T09:00:00")  # 16, 17, 18 missed
         self.run_cli("streak", "status")
-        r = self.apply(self.verdict_block(16, "在轨", mode="append"))
+        r = self.apply(self.verdict_block(16, "在轨", mode="append", away="出差"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.json()["streak"]["unrecorded"], 2)
+
+
+class BlockGateTest(CliTestCase):
+    """Update blocks need a completed protocol (issue #25 part 1)."""
+
+    def apply(self, text):
+        return CliResult(subprocess.run(
+            [sys.executable, CLI, "apply-block"], input=text,
+            env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True))
+
+    def snapshot_dir(self):
+        out = {}
+        for root, _d, files in os.walk(self.data_dir):
+            for f in files:
+                p = os.path.join(root, f)
+                with open(p, "rb") as fh:
+                    out[p] = fh.read()
+        return out
+
+    def test_new_phase_refuses_every_target(self):
+        self.run_cli("init")
+        before = self.snapshot_dir()
+        for f, body in (("vision.md", "V\n_Reason: r_"), ("anti-vision.md", "A\n_Reason: r_"),
+                        ("goals.md", "### Year Goal\nG\n_Reason: r_"),
+                        ("log/2026-01-15.md", "note"), ("protocol/x.md", "note")):
+            r = self.apply(block(f, "create", body))
+            self.assertNotEqual(r.returncode, 0, f)
+            self.assertIn("protocol is not complete", r.stderr)
+            self.assertIn("protocol resume", r.stderr)
+        self.assertEqual(self.snapshot_dir(), before)
+
+    def test_in_progress_and_shelved_refused(self):
+        self.run_cli("init")
+        self.run_cli("protocol", "resume")
+        r = self.apply(block("vision.md", "create", "V\n_Reason: r_"))
+        self.assertIn("protocol_in_progress", r.stderr)
+        self.set_now("2026-01-30T09:00:00")  # past the 7-day shelving
+        r = self.apply(block("vision.md", "create", "V\n_Reason: r_"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("protocol_shelved", r.stderr)
+        self.assertFalse(os.path.exists(self.data_path("vision.md"))
+                         and bool(self.read_data("vision.md").strip()))
+
+
+class RedoBlockTest(ActiveCliTestCase):
+    def test_redo_keeps_blocks_working(self):
+        r = self.run_cli("protocol", "redo")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.read_state()["phase"], "active")
+        r = CliResult(subprocess.run(
+            [sys.executable, CLI, "apply-block"],
+            input=block("vision.md", "append", "V2\n_Reason: r_"),
+            env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class BlockLogDateTest(ActiveCliTestCase):
+    """Log block file names must be real dates in [completion day, today]
+    (issue #25 part 2)."""
+
+    def setUp(self):
+        super().setUp()  # completed 2026-01-15
+        self.set_now("2026-01-16T09:00:00")
+
+    def apply(self, text):
+        return CliResult(subprocess.run(
+            [sys.executable, CLI, "apply-block"], input=text,
+            env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True))
+
+    def test_future_date_rejected_whole_batch(self):
+        r = self.apply(block("log/2026-01-16.md", "create", "ok")
+                       + block("log/2099-01-01.md", "create",
+                               "- 判定: 走偏\n- 判定理由: x"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("in the future", r.stderr)
+        self.assertFalse(os.path.exists(self.data_path("log", "2026-01-16.md")))
+        self.assertFalse(os.path.exists(self.data_path("log", "2099-01-01.md")))
+        self.assertEqual(self.read_state()["streak"]["drift"], 0)
+
+    def test_before_completion_rejected_completion_day_allowed(self):
+        r = self.apply(block("log/2026-01-14.md", "create", "note"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("before the protocol was completed", r.stderr)
+        self.assertFalse(os.path.exists(self.data_path("log", "2026-01-14.md")))
+        r = self.apply(block("log/2026-01-15.md", "create", "note"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.read_data("log", "2026-01-15.md"), "note\n")
+
+    def test_non_date_names_rejected(self):
+        for name in ("x", "2026-13-01", "2026-02-30", "2026-1-16", "notes"):
+            r = self.apply(block("log/%s.md" % name, "create", "note"))
+            self.assertNotEqual(r.returncode, 0, name)
+            self.assertIn("not a valid date", r.stderr)
+            self.assertFalse(os.path.exists(self.data_path("log", name + ".md")))
+
+
+class BlockSilenceNoteTest(ActiveCliTestCase):
+    """After silence a new verdict needs the 这几天发生了什么 line, saved as
+    `checkin record --while-away` saves it (issue #25 part 3)."""
+
+    def setUp(self):
+        super().setUp()  # completed 2026-01-15
+        self.set_now("2026-01-18T09:00:00")  # 16 and 17 silent
+
+    def apply(self, text):
+        return CliResult(subprocess.run(
+            [sys.executable, CLI, "apply-block"], input=text,
+            env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True))
+
+    VERDICT = "- 判定: 在轨\n- 判定理由: x"
+
+    def test_missing_or_empty_note_rejected_unchanged(self):
+        for body in (self.VERDICT, self.VERDICT + "\n- 这几天发生了什么:   "):
+            r = self.apply(block("log/2026-01-18.md", "create", "# 2026-01-18\n" + body))
+            self.assertNotEqual(r.returncode, 0, body)
+            self.assertIn("you were silent", r.stderr)
+            self.assertFalse(os.path.exists(self.data_path("log", "2026-01-18.md")))
+        self.assertFalse(os.path.exists(self.data_path("log", "2026-01-16.md")))
+        self.assertEqual(self.read_state()["streak"]["unrecorded"], 0)
+
+    def test_note_in_any_block_of_batch_accepts(self):
+        text = (block("log/2026-01-18.md", "create", "# 2026-01-18\n" + self.VERDICT)
+                + block("log/2026-01-17.md", "create", "- 这几天发生了什么: 病了"))
+        r = self.apply(text)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_same_log_as_command_line(self):
+        r = self.apply(block("log/2026-01-18.md", "create",
+                             "# 2026-01-18\n" + self.VERDICT
+                             + "\n- 这几天发生了什么: 病了"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        via_block = self.read_data("log", "2026-01-18.md")
+        self.setUp()
+        r = self.run_cli(
+            "checkin", "record", "--lever", "写作", "--levers-done", "写了",
+            "--action-drift", "no", "--action-reason", "无",
+            "--identity-protection", "yes", "--identity-reason", "无",
+            "--toward", "vision", "--toward-reason", "写了",
+            "--verdict", "在轨", "--verdict-reason", "x",
+            "--tomorrow-lever", "写作", "--while-away", "病了")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        via_cli = self.read_data("log", "2026-01-18.md")
+        away_line = "- 这几天发生了什么: 病了"
+        self.assertIn(away_line, via_block.split("\n"))
+        self.assertIn(away_line, via_cli.split("\n"))
+
+    def test_note_not_needed_without_silence(self):
+        self.set_now("2026-01-16T09:00:00")
+        r = self.apply(block("log/2026-01-16.md", "create", "# 2026-01-16\n" + self.VERDICT))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_note_not_needed_when_gap_is_dnd(self):
+        self.run_cli("dnd", "add", "2026-01-16")
+        self.run_cli("dnd", "add", "2026-01-17")
+        r = self.apply(block("log/2026-01-18.md", "create", "# 2026-01-18\n" + self.VERDICT))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_non_verdict_block_needs_no_note_after_silence(self):
+        r = self.apply(block("log/2026-01-18.md", "create", "just a note"))
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 class PlanBlockReasonTest(ActiveCliTestCase):

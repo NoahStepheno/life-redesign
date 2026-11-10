@@ -55,5 +55,5 @@ python3 "<skill_dir>/scripts/life_redesign.py" <命令> [参数]
 - 每答完一题立即用 `protocol answer` 落盘,保证可断点续做。
 - 判定只在交互式 `checkin` 中产生,不在任何后台或无头流程中产生。`notify` 的 AI 推送由命令行以只读方式调用,不改文件、不判定;推送命令(`plan` / `fire`)也不补记未记录,只往 `push.log` 追加不含用户原文的结果行。
 - 通知里不放私人内容;Year Goal / Daily Levers 原文上锁屏需要用户明确同意(`--show-user-text on`),你不得替用户打开。
-- 纯聊天 App(无文件、无 shell)一档:`LR snapshot` 导出状态快照,聊天结束产出更新块,用户用 `LR apply-block` 应用;更新块里的判定与 `checkin` 同规则并计入连续走偏(改判用带新事实的 `- 改判:` 行);改 Anti-vision / Vision / 目标的块必须以非空的 `_Reason: <原因>_` 行结尾,否则整批拒绝;见 PROTOCOL 第 10 节。给聊天 App 用户的提示词包和用户端说明在 [prompts/](./prompts/README.md)(`prompts/system-prompt.md` 供其在聊天开头粘贴)。
+- 纯聊天 App(无文件、无 shell)一档:`LR snapshot` 导出状态快照,聊天结束产出更新块,用户用 `LR apply-block` 应用;更新块里的判定与 `checkin` 同规则并计入连续走偏(改判用带新事实的 `- 改判:` 行);改 Anti-vision / Vision / 目标的块必须以非空的 `_Reason: <原因>_` 行结尾,否则整批拒绝;更新块也受同样的门禁与日期规则:一天协议未完成时一律拒绝,日志文件名必须是不晚于今天、不早于协议完成日的合法日期,沉默后写新判定必须带 `- 这几天发生了什么:` 行;见 PROTOCOL 第 10 节。给聊天 App 用户的提示词包和用户端说明在 [prompts/](./prompts/README.md)(`prompts/system-prompt.md` 供其在聊天开头粘贴)。
 - 用户情绪明显低落或出现危机迹象时,按 PROTOCOL 第 0 节第 5 条处理,优先于一切流程。

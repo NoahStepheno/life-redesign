@@ -159,7 +159,7 @@ state_s6()  { activate -3
 | 10 | 新事实才改判 | 适用 | 适用 | 降级:产出 `- 改判:` 行而不是调用 `revise-verdict` |
 | 11 | 同日想悄悄改判 → 引导走新事实改判 | 适用(CLI 会拒绝不同判定的再次 `record`) | 适用 | 降级:agent 不应产出带不同判定的追加块;即使产出,`apply-block` 也会整批拒绝 |
 | 12 | Escalation 引用 Anti-vision 原话 | 适用 | 适用 | 适用(快照里有 `anti_vision` 与 `streak.escalation`) |
-| 13 | 沉默后回归先问"这几天发生了什么" | 适用(CLI 强制 `--while-away`) | 适用 | 降级:agent 要从快照 `streak.unrecorded` 判断;更新块里该问题的答案写在 `- 这几天发生了什么:` 行(无强制) |
+| 13 | 沉默后回归先问"这几天发生了什么" | 适用(CLI 强制 `--while-away`) | 适用 | 降级:agent 要从快照 `streak.unrecorded` 判断;更新块里该问题的答案写在 `- 这几天发生了什么:` 行(CLI 强制:沉默后写新判定的块没有这一行会整批被拒绝) |
 | 14 | 改计划:问原因、展示新旧、指出更容易 | 适用 | 适用 | 降级:没有 `plan change`;块里只能用 `append`,CLI 不会强制原因(见第 6 节 6.5) |
 | 15 | 危机优先 | 适用 | 适用 | 适用 |
 | 16 | 推送文案与 AI 推送不含私人内容 | 适用 | 适用 | 不适用(推送由用户本机 `notify` 管理;但 agent 不得把私人内容建议放进通知设置) |
@@ -413,7 +413,7 @@ C 档没有 shell。**开聊前先把 `skill/prompts/system-prompt.md` 的全文
 
 - 判定要写进更新块的 `- 判定:` 与 `- 判定理由:`(两行相邻),而不是 `--verdict`。
 - 改判写成 `- 改判: 原判定 → 新判定 — 因 新事实 事实改判`。
-- 沉默后的"这几天发生了什么"写成日志里的 `- 这几天发生了什么: ...` 一行;CLI 在 `apply-block` 时不强制这一行,所以 agent 是否先问由人把关。
+- 沉默后的"这几天发生了什么"写成日志里的 `- 这几天发生了什么: ...` 一行;沉默后写新判定的块没有这一行(或为空),`apply-block` 会整批拒绝(`you were silent: a block that writes a verdict must also say what happened in the missing days: ...`),所以 agent 必须先问。日志日期也被检查:文件名必须是合法日期,不晚于今天,不早于协议完成日。
 - agent 得从快照读 `streak`、`anti_vision`、`goals`、`verdicts`(近 7 天),**没有实时 CLI 兜底**:T9、T11 在 C 档的"维持原判"更依赖模型自觉。
 
 ### T17 更新块能被正确产生和应用,非法块被拒绝
@@ -463,7 +463,11 @@ C 档没有 shell。**开聊前先把 `skill/prompts/system-prompt.md` 的全文
   - `'- 判定: 走偏' must be followed directly by a '- 判定理由: <reason>' line`
   - `cannot create vision.md: file already exists (use mode: append)`(对已存在文件用 `create`)
   - `goals content must be under a '### Year Goal|Month Project|Daily Levers|Constraints' section`
-- 拒绝是**整批**的:一个块非法,同批的合法块也不应用。可以让 agent 同时产出一个合法块和一个非法块来验证,`lr streak status` 前后应不变。
+  - `update blocks are refused until the one-day protocol is complete: the protocol is not complete (phase: new): ...`(协议未完成时的任何块)
+  - `block 1: log/2099-01-01.md is in the future (today is 2026-03-11): a log cannot be written ahead of its day`
+  - `block 1: log/2026-03-09.md is before the protocol was completed (2026-03-10): there is no log for days before that`
+  - `block 1: log/notes.md is not a valid date: log files are named log/YYYY-MM-DD.md`
+  - `block 1: you were silent: a block that writes a verdict must also say what happened in the missing days: add a non-empty line '- 这几天发生了什么: <what happened>' to the block`(沉默后写新判定,没有说明行)**整批**的:一个块非法,同批的合法块也不应用。可以让 agent 同时产出一个合法块和一个非法块来验证,`lr streak status` 前后应不变。
 
 ## 5. 记录表
 
@@ -509,7 +513,7 @@ rm -rf /tmp/lr-trial-project
 5. **(已修复,#22)B 档的更新块曾可以绕开 `plan change` 的"必须有原因"**。现在向 `vision.md` / `anti-vision.md` / `goals.md` 追加(或对空文件新建)的块必须以一行非空的 `_Reason: <原因>_` 结尾,缺少或为空整批拒绝;原因被存成版本的 `reason`,`show` 和月复盘的 `plan_changes` 都能读到。仍需人工确认的是 C 档 agent 会不会替用户编一个原因来过关(见 T17 触发 c 的第 6 条)。
 6. **危机门槛没有定义**(T15)。"严重抑郁迹象"的边界靠模型判断;CLI 不会也不能检查。
 7. **(已解决,#23)`skill/prompts/` 现已存在**:`skill/prompts/system-prompt.md` 是 C 档用户在聊天开头整段粘贴的提示词包,`skill/prompts/README.md` 是用户端说明(怎么粘贴快照、保存并用 `apply-block` 应用更新块、没有命令行时的手工退路,以及已实测的合法/非法块和真实错误信息)。C 档试用时先粘贴 `system-prompt.md`,再粘贴快照。仍需人工确认的是各聊天 App 是否真的遵守提示词(尤其是拒绝非法块、不替用户编原因)。
-8. **C 档看不到 `phase`**。快照没有 `phase`,PROTOCOL 10 要求 agent 自己确认协议已完成;快照里 `vision` 为 `null` 可以作为间接信号,但这是推断。
+8. **C 档看不到 `phase`**。快照没有 `phase`,PROTOCOL 10 要求 agent 自己确认协议已完成;快照里 `vision` 为 `null` 可以作为间接信号,但这是推断。(已修复,#25:即使 agent 判断错了,协议未完成时 `apply-block` 也会整批拒绝,所以更新块不再能绕过一天协议。)
 9. **快照的 `verdicts` 只含近 7 天**,而 Escalation 的"连续走偏"可以更长;agent 在 C 档不能靠自己数日志验证 `streak.drift`,只能信快照里的 `streak`。
 10. **"不要设置 `LIFE_REDESIGN_NOW`"与试用的时间控制**。试用必须靠 `LIFE_REDESIGN_NOW` 制造"几天前"的状态,所以本清单把所有时间都相对真实今天,并保证起点函数结束后该变量已 `unset`。如果你在启动 agent 的终端里手动留着它,agent 的行为不再贴近真实使用。
 11. **T2 的"只读 `cat` 数据目录"**:准则说"所有读写都经过 CLI",但禁止的只是修改。本清单把只读 `cat` 记为轻微不通过,需要你确认这是不是你想要的严格度。

@@ -120,6 +120,11 @@ _Reason: 本月出差一周,实际可用时间少了四分之一_
 |---|---|
 | 改计划的块没有 `_Reason:` 结尾行 | `error: block 1: goals.md needs a reason: end the block with a non-empty line '_Reason: <why this is changing>_'` |
 | `_Reason:` 行没有以 `_` 收尾(格式不对) | `error: block 1: anti-vision.md needs a reason: end the block with a non-empty line '_Reason: <why this is changing>_'` |
+| 一天协议还没完成(`phase` 是 `new`、进行中或已搁置)时写任何块 | `error: update blocks are refused until the one-day protocol is complete: the protocol is not complete (phase: new): finish the protocol first (`protocol resume`, then answer every question)` |
+| 日志日期晚于今天(`file: log/2099-01-01.md`,当时是 2026-03-11) | `error: block 1: log/2099-01-01.md is in the future (today is 2026-03-11): a log cannot be written ahead of its day` |
+| 日志日期早于协议完成日(完成日是 2026-03-10) | `error: block 1: log/2026-03-09.md is before the protocol was completed (2026-03-10): there is no log for days before that` |
+| 日志文件名不是日期(`file: log/notes.md`) | `error: block 1: log/notes.md is not a valid date: log files are named log/YYYY-MM-DD.md` |
+| 沉默后(有未记录的天数)写新判定,但没有 `- 这几天发生了什么:` 行 | `error: block 1: you were silent: a block that writes a verdict must also say what happened in the missing days: add a non-empty line '- 这几天发生了什么: <what happened>' to the block` |
 | `mode: replace` | `error: block 1: mode 'replace' not allowed; only create or append (records are append-only, ADR-0001)` |
 | `mode: delete` | `error: block 1: mode 'delete' not allowed; only create or append (records are append-only, ADR-0001)` |
 | 路径逃出数据目录(`file: log/../../etc/evil.md`) | `error: block 1: path 'log/../../etc/evil.md' is outside the data dir or malformed` |
@@ -148,11 +153,11 @@ _Reason: 本月出差一周,实际可用时间少了四分之一_
 
 - AI 无法核实你说的事实,也无法替你运行命令;它记不住上一场对话,每次都要重新粘贴提示词和快照。
 - 更新块**不能**设置"明天的 Daily Levers"(那是命令行 `checkin record` 的功能);想改明天的杠杆,只能走"修改计划"改 `goals.md` 的 `### Daily Levers`(带原因)。
-- 更新块对"沉默后回来先说发生了什么"不做强制(命令行的 `checkin record` 才强制),需要 AI 自觉先问。
+- 更新块对"沉默后回来先说发生了什么"也强制:沉默后(有未记录的天数,勿扰日不算)写新判定的块必须带非空的 `- 这几天发生了什么:` 行,否则整批拒绝(与命令行 `checkin record --while-away` 一致)。这一行要用你的原话,AI 仍应先问你。
 - 命令行不检查判定与各项回答是否一致,不检查"新事实"是否真的新:这些靠 AI 的自觉和你的诚实。
-- 命令行不检查日志的日期:块里写错日期、写到未来的日期都会被接受。核对 AI 用的日期。
+- 日志日期会被检查:文件名必须是合法日期,不能晚于今天,不能早于协议完成日(完成当天允许)。但"今天"取你电脑的时钟,AI 在块里写错、但仍在这个范围内的日期(比如写成昨天)不会被发现。核对 AI 用的日期。
 - 沉默期里被标成"未记录"的过去日子,日志文件已经存在(只有一行 `- 未记录`),给它补判定要用 `mode: append`,用 `create` 会被拒绝;快照看不出这些日期。
-- 对尚未完成协议的数据目录,命令行**也会**接受计划块和日志块(`phase` 不拦截 `apply-block`)。别用它来绕过一天协议。
+- 一天协议没有完成时,命令行拒绝所有更新块(`new`、进行中、已搁置都一样);先用命令行完成协议。重做协议期间不受影响。
 
 ## 没有命令行怎么办(手工退路)
 

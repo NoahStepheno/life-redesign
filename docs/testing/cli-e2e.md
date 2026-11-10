@@ -14,7 +14,7 @@
 python3 -m unittest discover
 ```
 
-- 当前共 194 个测试,完整运行约 7 分钟(实测 427 秒,多数时间花在反复启动 CLI 子进程)。
+- 当前共 206 个测试,完整运行约 7 分钟(实测 469 秒,多数时间花在反复启动 CLI 子进程)。
 - 迭代时只跑一个模块、一个类或一个用例(实测分别约 54 秒、13 秒、3 秒;`test_init` 约 2 秒):
 
 ```sh
@@ -130,6 +130,16 @@ lr streak status
 lr review month
 lr plan change vision --text x --why y
 lr protocol answer 1.1 --text hi
+lr apply-block <<'EOF'
+=== LIFE-REDESIGN UPDATE ===
+file: vision.md
+mode: create
+---
+三年后的周二
+_Reason: 先写下来_
+=== END ===
+EOF
+ls -A "$LIFE_REDESIGN_HOME"
 ```
 
 ```output
@@ -145,8 +155,14 @@ error: the protocol is not complete (phase: new): finish the protocol first (`pr
 [exit 1]
 error: protocol not started: run `protocol resume` first
 [exit 1]
+error: update blocks are refused until the one-day protocol is complete: the protocol is not complete (phase: new): finish the protocol first (`protocol resume`, then answer every question)
+[exit 1]
+log
+protocol
+state.json
 ```
 
+最后一条是更新块:协议未完成时,更新块写任何目标文件(包括 `vision.md`)都被拒绝,数据目录没有任何变化。
 ### 3.3 一天协议:逐题回答、当天续做
 
 题目编号:`1.1` 到 `1.14` 是 Part 1(Excavation),`3.1` 到 `3.7` 加 `3.constraints` 是 Part 3(Synthesis)。Part 2 的 Interrupt 是定时推送,不通过 CLI 回答。共 22 题,必须按顺序。
@@ -686,6 +702,16 @@ ls "$LIFE_REDESIGN_HOME/log"
 ```sh
 lr streak status
 ci 在轨 "回来了,两项完成" --lever "写 500 字"
+lr apply-block <<'EOF'
+=== LIFE-REDESIGN UPDATE ===
+file: log/2026-01-29.md
+mode: create
+---
+# 2026-01-29
+- 判定: 在轨
+- 判定理由: 回来了,两项完成
+=== END ===
+EOF
 ci 在轨 "回来了,两项完成" --lever "写 500 字" --while-away "出差加感冒,断网四天"
 cat "$LIFE_REDESIGN_HOME/log/2026-01-28.md" "$LIFE_REDESIGN_HOME/log/2026-01-29.md"
 lr streak status
@@ -693,8 +719,9 @@ lr streak status
 
 ```output
 {"drift": 0, "unrecorded": 3, "escalation": true, "threshold": 3, "dnd_dates": ["2026-01-26"]}
-{"date": "2026-01-29", "pushes": [{"slot": "evening", "time": "21:30", "text": "该打卡了:花几分钟记录今天。"}], "reason": "silence: unrecorded streak"}
 error: you were silent: first say what happened in the missing days (--while-away "...") before checking in
+[exit 1]
+error: block 1: you were silent: a block that writes a verdict must also say what happened in the missing days: add a non-empty line '- 这几天发生了什么: <what happened>' to the block
 [exit 1]
 {"date": "2026-01-29", "file": "log/2026-01-29.md", "verdict": "在轨", "tomorrow_date": "2026-01-30", "tomorrow_levers": ["写 500 字", "跑步 20 分钟"]}
 # 2026-01-28
@@ -800,12 +827,12 @@ lr snapshot
 {"generated": "2026-02-01T10:00:00", "vision": "三年后的周二:我在自己的工作室醒来,身体轻盈。我是那种说到做到的人。", "anti_vision": "(第二版)十年后我仍在原地,没有人记得我做过什么。", "goals": {"Year Goal": "年底前拿到第一个付费用户", "Month Project": "把原型给 3 个人看并收集反馈", "Constraints": "不牺牲睡眠和家人时间", "Daily Levers": "写 500 字\n跑步 20 分钟"}, "verdicts": [{"date": "2026-01-29", "verdict": "在轨"}, {"date": "2026-01-30", "verdict": "在轨"}, {"date": "2026-01-31", "verdict": "轻微偏离"}], "streak": {"drift": 0, "unrecorded": 0, "escalation": false}}
 ```
 
-更新块从标准输入读(也可以 `lr apply-block --file 文件名`)。`create` 新建文件,`append` 追加到已有文件。多个块先整体校验,全部合法才写入。
+更新块从标准输入读(也可以 `lr apply-block --file 文件名`)。`create` 新建文件,`append` 追加到已有文件。多个块先整体校验,全部合法才写入。更新块只在一天协议完成后才被接受(见 3.2),写 `log/` 的块还要满足三条日期与沉默规则(3.15 和 3.9 有实测):文件名必须是合法日期 `log/YYYY-MM-DD.md`;日期不能晚于今天,也不能早于协议完成日(完成当天本身允许);沉默之后(存在未记录的天数,勿扰日不算)写入新判定的块必须同时带一行非空的 `- 这几天发生了什么: ...`,与 `checkin record --while-away` 写入日志的那一行相同。
 
 ```sh
 lr apply-block <<'EOF'
 === LIFE-REDESIGN UPDATE ===
-file: log/2026-02-01-note.md
+file: log/2026-01-26.md
 mode: create
 ---
 今天在聊天 App 里复盘了一遍。
@@ -813,7 +840,7 @@ mode: create
 EOF
 lr apply-block <<'EOF'
 === LIFE-REDESIGN UPDATE ===
-file: log/2026-02-01-note.md
+file: log/2026-01-26.md
 mode: create
 ---
 再创建一次
@@ -821,20 +848,20 @@ mode: create
 EOF
 lr apply-block <<'EOF'
 === LIFE-REDESIGN UPDATE ===
-file: log/2026-02-01-note.md
+file: log/2026-01-26.md
 mode: append
 ---
 补充一句。
 === END ===
 EOF
-cat "$LIFE_REDESIGN_HOME/log/2026-02-01-note.md"
+cat "$LIFE_REDESIGN_HOME/log/2026-01-26.md"
 ```
 
 ```output
-{"applied": [{"file": "log/2026-02-01-note.md", "mode": "create"}], "streak": {"drift": 0, "unrecorded": 0, "escalation": false, "threshold": 3, "dnd_dates": ["2026-01-26", "2026-01-30"]}}
-error: block 1: cannot create log/2026-02-01-note.md: file already exists (use mode: append)
+{"applied": [{"file": "log/2026-01-26.md", "mode": "create"}], "streak": {"drift": 0, "unrecorded": 0, "escalation": false, "threshold": 3, "dnd_dates": ["2026-01-26", "2026-01-30"]}}
+error: block 1: cannot create log/2026-01-26.md: file already exists (use mode: append)
 [exit 1]
-{"applied": [{"file": "log/2026-02-01-note.md", "mode": "append"}], "streak": {"drift": 0, "unrecorded": 0, "escalation": false, "threshold": 3, "dnd_dates": ["2026-01-26", "2026-01-30"]}}
+{"applied": [{"file": "log/2026-01-26.md", "mode": "append"}], "streak": {"drift": 0, "unrecorded": 0, "escalation": false, "threshold": 3, "dnd_dates": ["2026-01-26", "2026-01-30"]}}
 今天在聊天 App 里复盘了一遍。
 补充一句。
 ```
@@ -1045,6 +1072,32 @@ x
 EOF
 lr apply-block <<'EOF'
 === LIFE-REDESIGN UPDATE ===
+file: log/2099-01-01.md
+mode: create
+---
+# 2099-01-01
+- 判定: 走偏
+- 判定理由: 未来的日子
+=== END ===
+EOF
+lr apply-block <<'EOF'
+=== LIFE-REDESIGN UPDATE ===
+file: log/2026-01-14.md
+mode: create
+---
+协议完成前一天
+=== END ===
+EOF
+lr apply-block <<'EOF'
+=== LIFE-REDESIGN UPDATE ===
+file: log/notes.md
+mode: create
+---
+文件名不是日期
+=== END ===
+EOF
+lr apply-block <<'EOF'
+=== LIFE-REDESIGN UPDATE ===
 file: log/2026-02-02.md
 mode: create
 ---
@@ -1061,6 +1114,12 @@ error: block 1: path '/etc/passwd' is outside the data dir or malformed
 error: block 1: file 'state.json' is not an allowed target (vision.md, anti-vision.md, goals.md, log/*.md, protocol/*.md)
 [exit 1]
 error: block 1: cannot append to log/2026-02-09.md: file does not exist (use mode: create)
+[exit 1]
+error: block 1: log/2099-01-01.md is in the future (today is 2026-02-01): a log cannot be written ahead of its day
+[exit 1]
+error: block 1: log/2026-01-14.md is before the protocol was completed (2026-01-20): there is no log for days before that
+[exit 1]
+error: block 1: log/notes.md is not a valid date: log files are named log/YYYY-MM-DD.md
 [exit 1]
 error: block 1: body is empty
 [exit 1]
@@ -1147,8 +1206,8 @@ _Reason: x_
 EOF
 lr apply-block <<'EOF'
 === LIFE-REDESIGN UPDATE ===
-file: log/2026-02-03.md
-mode: create
+file: log/2026-02-01.md
+mode: append
 ---
 合法的第一块
 === END ===
@@ -1159,7 +1218,7 @@ mode: replace
 x
 === END ===
 EOF
-ls "$LIFE_REDESIGN_HOME/log" | tail -3
+tail -2 "$LIFE_REDESIGN_HOME/log/2026-02-01.md"
 lr apply-block --file /tmp/no-such-file.txt
 ```
 
@@ -1172,9 +1231,8 @@ error: block 1: goals content must be under a '### Year Goal|Month Project|Daily
 [exit 1]
 error: block 2: mode 'replace' not allowed; only create or append (records are append-only, ADR-0001)
 [exit 1]
-2026-01-31.md
-2026-02-01-note.md
-2026-02-01.md
+- 判定理由: 一整天没有产出
+- 改判: 走偏 → 在轨 — 因 晚上补做了 500 字 事实改判 (21:40:00)
 error: cannot read /tmp/no-such-file.txt: [Errno 2] No such file or directory: '/tmp/no-such-file.txt'
 [exit 1]
 ```

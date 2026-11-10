@@ -456,6 +456,7 @@ mode: create
 
 CLI 对更新块的规则(违反则整批拒绝,什么都不写,先全部校验再写入):
 
+- **协议门禁**:一天协议没有完成(`new`、`protocol_in_progress`、`protocol_shelved`)时,任何目标文件的更新块都被拒绝,什么都不写(`update blocks are refused until the one-day protocol is complete: the protocol is not complete (phase: <phase>): finish the protocol first (`protocol resume`, then answer every question)`),用命令行的 `protocol resume` / `protocol answer` 完成协议。与 `checkin` / `plan` / `review` 用同一个门禁(含 7 天搁置的惰性判定);重做协议期间阶段仍是 `active`,不受影响。
 - 头部只允许 `file:` 和 `mode:`,然后一行 `---`,正文,再一行 `=== END ===`;可含多个块。缺头部、缺 `---`、缺结束行、没有任何块都会报错。
 - `mode` 只允许 `create` 或 `append`,**不允许 `replace` 或 `delete`**(报 `mode '<m>' not allowed; only create or append`)。
 - `file` 只允许 `vision.md`、`anti-vision.md`、`goals.md`、`log/*.md`、`protocol/*.md`;绝对路径、`..`、逃出数据目录的路径一律拒绝。`state.json` 不能写。
@@ -465,6 +466,8 @@ CLI 对更新块的规则(违反则整批拒绝,什么都不写,先全部校验�
 - `vision.md` / `anti-vision.md`:正文是新版本的内容,**不要自己写 `## 日期` 标题**(正文里出现以 `## ` 开头的行会被拒绝),CLI 加日期标题并追加。文件已存在时用 `append`;文件不存在时用 `create`,已存在却用 `create` 会被拒绝。
 - `goals.md`:正文必须按 `### Year Goal` / `### Month Project` / `### Daily Levers` / `### Constraints` 分节(未知小节被拒绝,小节外不能有文字);没写的小节沿用上一版。
 - 写入 `log/*.md` 的块里的判定与 `checkin` 同规则,违反则整批拒绝:新判定写成相邻两行 `- 判定: 在轨|轻微偏离|走偏` 与 `- 判定理由: <理由>`(判定值非法、缺理由或理由为空都拒绝);该日已有判定时,追加**不同**的判定会被拒绝(同一判定可再追加);改判必须写成带新事实的一行 `- 改判: <原判定> → <新判定> — 因 <新事实> 事实改判`(与 `revise-verdict` 写入的格式相同;原判定必须等于该日当前判定,新事实不能为空,该日还没有判定时无从改判)。
+- **日志日期**:写入 `log/` 的块,文件名必须是合法日期 `log/YYYY-MM-DD.md`(`<file> is not a valid date: log files are named log/YYYY-MM-DD.md`);日期晚于今天被拒绝(`<file> is in the future (today is YYYY-MM-DD): a log cannot be written ahead of its day`);早于协议完成日(`activated_on`)被拒绝(`<file> is before the protocol was completed (YYYY-MM-DD): there is no log for days before that`),协议完成当天本身允许(它是基线,不会被补记为未记录)。整批拒绝。
+- **沉默后的说明**:沉默状态下(算上这次将被补记的天数,`unrecorded > 0`;只由勿扰日构成的间隔不算),写入新判定(`- 判定:` 行)的块必须在同一批里带一行非空的 `- 这几天发生了什么: <用户的原话>`,与 `checkin record --while-away` 写入日志的那一行完全相同;缺少或为空被拒绝(`block N: you were silent: a block that writes a verdict must also say what happened in the missing days: add a non-empty line '- 这几天发生了什么: <what happened>' to the block`)。这一行可以在批内任一个块里。只写 `- 改判:` 或普通文字的块不触发。
 - 应用含 `log/` 的块之后,CLI 与 `checkin` 一样先补记未记录,再按日志重算 `drift`、`unrecorded` 和 Escalation,并在输出的 `streak` 字段返回(同一组事实走更新块或走 `checkin`,得到相同的计数和 Escalation)。只有 `- 未记录` 占位的一天补上判定后不再算未记录。
 
 ---

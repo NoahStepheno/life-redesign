@@ -435,7 +435,29 @@ def resolve_target(n, rel):
     return full
 
 
-def validate_block(b, seen):
+def check_block_log_date(n, rel, state):
+    """log/<name>.md written through an update block: the name must be a real
+    date, not after today, not before the protocol-completion day (which is
+    itself allowed: it is the baseline)."""
+    day = rel[len("log/"):-len(".md")]
+    try:
+        if not DATE_RE.match(day):
+            raise ValueError(day)
+        datetime.datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        raise CliError("block %d: %s is not a valid date: log files are named "
+                       "log/YYYY-MM-DD.md" % (n, rel))
+    if day > now().date().isoformat():
+        raise CliError("block %d: %s is in the future (today is %s): a log "
+                       "cannot be written ahead of its day"
+                       % (n, rel, now().date().isoformat()))
+    start = state.get("activated_on") or state.get("streak_cursor")
+    if start and day < start:
+        raise CliError("block %d: %s is before the protocol was completed (%s): "
+                       "there is no log for days before that" % (n, rel, start))
+
+
+def validate_block(b, seen, ctx):
     n = b["n"]
     if not b["file"]:
         raise CliError("block %d: missing 'file' header" % n)
@@ -480,9 +502,14 @@ def validate_block(b, seen):
             elif os.path.isfile(full):
                 with open(full, encoding="utf-8") as f:
                     verdict = current_verdict(f.read())
+            check_block_log_date(n, b["file"], ctx)
             verdict = check_block_verdicts(n, b["file"], body, verdict)
+        lines = body.split("\n")
+        away = [m.group(1) for m in (AWAY_RE.match(x) for x in lines) if m]
         return {"full": full, "kind": kind, "mode": b["mode"], "body": body,
-                "verdict": verdict}
+                "verdict": verdict, "n": n,
+                "new_verdict": any(VERDICT_RE.match(x) for x in lines),
+                "away": away}
     if kind == "goals.md":
         sections = {}
         name = None
@@ -512,8 +539,30 @@ def validate_block(b, seen):
             "reason": reason}
 
 
+def check_block_silence_note(plan):
+    """After silence (unrecorded days > 0, DND days excluded), a batch that
+    writes a new verdict must also carry the 这几天发生了什么 line, exactly as
+    `checkin record` demands --while-away. Silence is read without
+    back-filling, so a rejected batch writes nothing."""
+    writes = [p for p in plan if p.get("new_verdict")]
+    if not writes:
+        return
+    away = [a for p in plan for a in p.get("away", [])]
+    if any(a.strip() for a in away):
+        return
+    raise CliError(
+        "block %d: you were silent: a block that writes a verdict must also "
+        "say what happened in the missing days: add a non-empty line '%s <what "
+        "happened>' to the block" % (writes[0]["n"], AWAY_PREFIX))
+
+
 def cmd_apply_block(args):
-    load_state()
+    try:
+        state = require_active(load_state())
+    except CliError as e:
+        raise CliError("update blocks are refused until the one-day protocol "
+                       "is complete: %s" % e)
+    silent = with_pending_unrecorded(state)["streak"]["unrecorded"] > 0
     if args.file:
         try:
             with open(args.file, encoding="utf-8") as f:
@@ -526,9 +575,11 @@ def cmd_apply_block(args):
     seen = {}
     plan = []
     for b in blocks:  # validate everything before writing anything
-        item = validate_block(b, seen)
+        item = validate_block(b, seen, state)
         seen[item["full"]] = item.get("verdict")
         plan.append(item)
+    if silent:
+        check_block_silence_note(plan)
     for b, item in zip(blocks, plan):
         full = item["full"]
         os.makedirs(os.path.dirname(full), exist_ok=True)
@@ -883,6 +934,8 @@ def cmd_protocol_answer(args):
 VERDICTS = ("在轨", "轻微偏离", "走偏")
 VERDICT_RE = re.compile(r"^- 判定: (.+?)[ \t]*$")
 REVISION_RE = re.compile(r"^- 改判: .+? → (.+?) — 因 ")
+AWAY_PREFIX = "- 这几天发生了什么:"  # written by `checkin record --while-away`
+AWAY_RE = re.compile(r"^" + re.escape(AWAY_PREFIX) + r"[ \t]*(.*)$")
 
 
 def log_path(date):
@@ -1036,7 +1089,7 @@ def cmd_checkin_record(args):
         "- 判定理由: %s" % verdict_reason,
     ]
     if away:
-        lines.append("- 这几天发生了什么: %s" % one_line(away, "--while-away"))
+        lines.append("%s %s" % (AWAY_PREFIX, one_line(away, "--while-away")))
     path = log_path(date)
     if os.path.isfile(path) and os.path.getsize(path) > 0:
         head = "## %s 再次打卡" % t.strftime("%H:%M:%S")

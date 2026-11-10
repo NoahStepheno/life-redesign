@@ -14,7 +14,7 @@
 python3 -m unittest discover
 ```
 
-- 当前共 179 个测试,完整运行约 6 分钟(实测 353 秒,多数时间花在反复启动 CLI 子进程)。
+- 当前共 188 个测试,完整运行约 7 分钟(实测 409 秒,多数时间花在反复启动 CLI 子进程)。
 - 迭代时只跑一个模块、一个类或一个用例(实测分别约 54 秒、13 秒、3 秒;`test_init` 约 2 秒):
 
 ```sh
@@ -648,7 +648,7 @@ ls "$LIFE_REDESIGN_HOME/log"
 2026-01-25.md
 ```
 
-`notify plan` 只是计算推送计划,不发送任何东西。勿扰日的计划为空:
+`notify plan` 只是计算推送计划,不发送任何东西,而且是只读的:它在内存里按同样的规则数出未记录天数,不写 `log/`、不改连续计数(补记只发生在 `checkin`、`streak status`、快照这类用户交互里)。勿扰日的计划为空:
 
 ```sh
 lr notify plan --date 2026-01-26
@@ -660,10 +660,31 @@ lr notify plan --date 2026-01-26
 
 到 29 日,25、27、28 日三天未记录,`unrecorded` 达到 3,`escalation` 为 `true`,并且推送计划只剩晚间一条(沉默期)。沉默后回来打卡,CLI 要求先说明这几天发生了什么(`--while-away`)。
 
+先只看推送计划(此时 27、28 日还没有补记):计划已经是沉默期,但 `log/` 和连续计数都没有变化。再看 `streak status`,这才补记。
+
 ```sh
 clock 2026-01-29T10:00:00
-lr streak status
+ls "$LIFE_REDESIGN_HOME/log"
 lr notify plan
+ls "$LIFE_REDESIGN_HOME/log"
+```
+
+```output
+2026-01-21.md
+2026-01-22.md
+2026-01-23.md
+2026-01-24.md
+2026-01-25.md
+{"date": "2026-01-29", "pushes": [{"slot": "evening", "time": "21:30", "text": "该打卡了:花几分钟记录今天。"}], "reason": "silence: unrecorded streak"}
+2026-01-21.md
+2026-01-22.md
+2026-01-23.md
+2026-01-24.md
+2026-01-25.md
+```
+
+```sh
+lr streak status
 ci 在轨 "回来了,两项完成" --lever "写 500 字"
 ci 在轨 "回来了,两项完成" --lever "写 500 字" --while-away "出差加感冒,断网四天"
 cat "$LIFE_REDESIGN_HOME/log/2026-01-28.md" "$LIFE_REDESIGN_HOME/log/2026-01-29.md"

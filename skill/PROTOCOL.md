@@ -342,7 +342,7 @@ LR checkin record \
 ### 6.2 计数与升级
 
 - `streak.drift` = 日志中**结尾连续**的"走偏"天数。非走偏的判定把它归零;未记录日和勿扰日不计数,也不打断(中间隔着未记录日的两个走偏日仍算连续)。CLI 每次 `record` / `revise-verdict` / 应用含 `log/` 的更新块时按日志重算。
-- 当天没有打卡:次日首次调用 `checkin` / `streak status` / `notify` / `snapshot` 时,CLI 对中间每个非勿扰日补一行 `- 未记录`,`streak.unrecorded += 1`;一旦 `checkin record` 则重置为 0。勿扰日不计入。完成协议的当天永远不补记。
+- 当天没有打卡:次日首次调用 `checkin` / `streak status` / `snapshot` 等用户交互命令时(`notify` 推送命令不会补记,只在内存里按同一规则计算未记录天数),CLI 对中间每个非勿扰日补一行 `- 未记录`,`streak.unrecorded += 1`;一旦 `checkin record` 则重置为 0。勿扰日不计入。完成协议的当天永远不补记。
 - `streak.drift >= 3` 或 `streak.unrecorded >= 3`:CLI 把 `escalation` 置为 `true`(只是标志,不替你追问)。你必须触发**升级追问**:
   - 引用用户自己的 Anti-vision 原话,问:"你写过这个周二。这三天你在向哪个周二靠近?"
   - 追问真实原因,不接受表面理由。
@@ -426,9 +426,9 @@ LR checkin record \
 | 命令 | 含义 |
 |---|---|
 | `LR notify config [--morning HH:MM] [--evening HH:MM] [--window 起 止] [--show-user-text on\|off] [--ai on\|off] [--client "<命令>"]` | 读或改推送设置;不带参数就是查看。返回 `{notify, reinstall_required}`。时间格式错误报 `--morning must be HH:MM (24h)`;窗口起不早于止报 `--window start must be before end` |
-| `LR notify plan [--date YYYY-MM-DD]` | 某天的推送计划与文案(只读) |
-| `LR notify fire morning\|random\|evening [--dry-run] [--tick]` | 发送(或 `--dry-run` 只显示)一条通知;`--tick` 供 launchd 轮询用,同一天同一位只发一次。你一般只用 `--dry-run` 给用户预览 |
-| `LR notify install [--dry-run]` / `uninstall [--dry-run]` | 注册/卸载 macOS launchd 任务;非 macOS 报错 `launchd install/uninstall is macOS only`。先 `--dry-run` 给用户看将要做什么,征得同意后再正式执行 |
+| `LR notify plan [--date YYYY-MM-DD]` | 某天的推送计划与文案(只读:不写 `log/`、不改 streak 计数) |
+| `LR notify fire morning\|random\|evening [--dry-run] [--tick]` | 发送(或 `--dry-run` 只显示)一条通知;`--tick` 供 launchd 轮询用,同一天同一位只发一次。你一般只用 `--dry-run` 给用户预览。每次尝试在数据目录的 `push.log` 追加一行 `<时间> <时段> <结果>`(sent / dry-run / skipped: 原因 / failed: 错误),绝不写用户原文;超过 64 KB 只保留最后 500 行 |
+| `LR notify install [--dry-run]` / `uninstall [--dry-run]` | 注册/卸载 macOS launchd 任务;非 macOS 报错 `launchd install/uninstall is macOS only`。先 `--dry-run` 给用户看将要做什么(含日志路径),征得同意后再正式执行。每个任务的标准输出/错误都写到 `<数据目录>/push.log`;卸载不删除它(属于用户数据),查看用 `tail push.log`,清理自行删除该文件 |
 | `LR dnd list` / `add YYYY-MM-DD` / `remove YYYY-MM-DD` | 勿扰日 |
 
 修改了 `--morning` / `--evening` 后,若 `reinstall_required` 为 `true`,需要重新 `notify install`。launchd 任务里记录的是脚本当时的绝对路径:skill 目录被移动或更新位置后,也要重新 `notify install`。

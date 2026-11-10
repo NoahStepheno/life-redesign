@@ -14,4 +14,4 @@ Single-context: one root `GLOSSARY.md` plus `docs/adr/`. See `docs/agents/domain
 
 ## Repo layout
 
-The repo root is for developing this project. Everything users install lives in the self-contained `skill/` directory (`SKILL.md`, `AGENTS.md`, `PROTOCOL.md`, `scripts/`, `prompts/`). Files in `skill/` must not link to root-level files such as `GLOSSARY.md`, since those are not shipped.
+The repo root is for developing this project. Everything users install lives in the self-contained `skill/` directory (`SKILL.md`, `AGENTS.md`, `PROTOCOL.md`, `scripts/`, `prompts/` — the chat-app pack: `prompts/system-prompt.md` and `prompts/README.md`). Files in `skill/` must not link to root-level files such as `GLOSSARY.md`, since those are not shipped.

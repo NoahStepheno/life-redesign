@@ -130,7 +130,7 @@ life-redesign/
     ├── SKILL.md          # Claude Code 入口
     ├── AGENTS.md         # 其他 harness 入口
     ├── PROTOCOL.md       # 中立协议:问题、规则、判定准则、行为准则
-    ├── prompts/          # B 档系统提示词包 + 快照/更新块格式
+    ├── prompts/          # B 档(纯聊天 App):system-prompt.md(开聊粘贴的系统提示词包)+ README.md(快照/更新块的用户端说明)
     └── scripts/          # 数据读写、launchd 安装/卸载、通知
 ```
 

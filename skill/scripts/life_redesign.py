@@ -300,6 +300,23 @@ def write_version(path, body):
     append_entry(path, "## %s\n%s\n" % (now().date().isoformat(), body))
 
 
+def reason_entry(body, reason):
+    """Text of a plan version that carries a reason (shared by `plan change`
+    and update blocks): `## <date>`, body, final `_Reason: <why>_` line."""
+    return "## %s\n%s\n_Reason: %s_\n" % (now().date().isoformat(), body, reason)
+
+
+def split_reason(body):
+    """Split an update-block body into (content, reason): the body must END
+    with a non-empty `_Reason: <why>_` line. Returns (None, None) otherwise."""
+    content, _, last = body.rstrip().rpartition("\n")
+    m = REASON_RE.match(last.strip())
+    reason = " ".join(m.group(1).split()) if m else ""
+    if not reason:
+        return None, None
+    return content, reason
+
+
 def goals_text(sections):
     """Render goals sections (title -> body) in canonical order."""
     return "\n\n".join("### %s\n%s" % (t, sections[t])
@@ -418,7 +435,29 @@ def resolve_target(n, rel):
     return full
 
 
-def validate_block(b, seen):
+def check_block_log_date(n, rel, state):
+    """log/<name>.md written through an update block: the name must be a real
+    date, not after today, not before the protocol-completion day (which is
+    itself allowed: it is the baseline)."""
+    day = rel[len("log/"):-len(".md")]
+    try:
+        if not DATE_RE.match(day):
+            raise ValueError(day)
+        datetime.datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        raise CliError("block %d: %s is not a valid date: log files are named "
+                       "log/YYYY-MM-DD.md" % (n, rel))
+    if day > now().date().isoformat():
+        raise CliError("block %d: %s is in the future (today is %s): a log "
+                       "cannot be written ahead of its day"
+                       % (n, rel, now().date().isoformat()))
+    start = state.get("activated_on") or state.get("streak_cursor")
+    if start and day < start:
+        raise CliError("block %d: %s is before the protocol was completed (%s): "
+                       "there is no log for days before that" % (n, rel, start))
+
+
+def validate_block(b, seen, ctx):
     n = b["n"]
     if not b["file"]:
         raise CliError("block %d: missing 'file' header" % n)
@@ -432,6 +471,20 @@ def validate_block(b, seen):
     if not body.strip():
         raise CliError("block %d: body is empty" % n)
     exists = os.path.exists(full) or full in seen
+    reason = None
+    if b["file"] in APPEND_TARGETS.values():
+        # plan files: a change needs a why, exactly as `plan change` (issue #22)
+        body, reason = split_reason(body)
+        if reason is None:
+            raise CliError(
+                "block %d: %s needs a reason: end the block with a non-empty "
+                "line '_Reason: <why this is changing>_'" % (n, b["file"]))
+        if not body.strip():
+            raise CliError("block %d: body is empty" % n)
+        if os.path.isfile(full) and full not in seen:
+            with open(full, encoding="utf-8") as f:
+                if not f.read().strip():
+                    exists = False  # an empty plan file takes a first version
     if b["mode"] == "create" and exists:
         raise CliError("block %d: cannot create %s: file already exists "
                        "(use mode: append)" % (n, b["file"]))
@@ -440,7 +493,23 @@ def validate_block(b, seen):
         if b["mode"] == "append" and not exists:
             raise CliError("block %d: cannot append to %s: file does not exist "
                            "(use mode: create)" % (n, b["file"]))
-        return {"full": full, "kind": kind, "mode": b["mode"], "body": body}
+        verdict = None
+        if b["file"].startswith("log/"):
+            # same rules as `checkin`; seen[full] is the day's verdict after
+            # earlier blocks of this batch
+            if full in seen:
+                verdict = seen[full]
+            elif os.path.isfile(full):
+                with open(full, encoding="utf-8") as f:
+                    verdict = current_verdict(f.read())
+            check_block_log_date(n, b["file"], ctx)
+            verdict = check_block_verdicts(n, b["file"], body, verdict)
+        lines = body.split("\n")
+        away = [m.group(1) for m in (AWAY_RE.match(x) for x in lines) if m]
+        return {"full": full, "kind": kind, "mode": b["mode"], "body": body,
+                "verdict": verdict, "n": n,
+                "new_verdict": any(VERDICT_RE.match(x) for x in lines),
+                "away": away}
     if kind == "goals.md":
         sections = {}
         name = None
@@ -463,13 +532,37 @@ def validate_block(b, seen):
         for name, v in sections.items():
             given[name] = check_body("\n".join(v), "block %d section %r" % (n, name),
                                      r"^#{1,3} ")
-        return {"full": full, "kind": kind, "mode": b["mode"], "given": given}
+        return {"full": full, "kind": kind, "mode": b["mode"], "given": given,
+                "reason": reason}
     body = check_body(body, "block %d body" % n, r"^## ")
-    return {"full": full, "kind": kind, "mode": b["mode"], "body": body}
+    return {"full": full, "kind": kind, "mode": b["mode"], "body": body,
+            "reason": reason}
+
+
+def check_block_silence_note(plan):
+    """After silence (unrecorded days > 0, DND days excluded), a batch that
+    writes a new verdict must also carry the 这几天发生了什么 line, exactly as
+    `checkin record` demands --while-away. Silence is read without
+    back-filling, so a rejected batch writes nothing."""
+    writes = [p for p in plan if p.get("new_verdict")]
+    if not writes:
+        return
+    away = [a for p in plan for a in p.get("away", [])]
+    if any(a.strip() for a in away):
+        return
+    raise CliError(
+        "block %d: you were silent: a block that writes a verdict must also "
+        "say what happened in the missing days: add a non-empty line '%s <what "
+        "happened>' to the block" % (writes[0]["n"], AWAY_PREFIX))
 
 
 def cmd_apply_block(args):
-    load_state()
+    try:
+        state = require_active(load_state())
+    except CliError as e:
+        raise CliError("update blocks are refused until the one-day protocol "
+                       "is complete: %s" % e)
+    silent = with_pending_unrecorded(state)["streak"]["unrecorded"] > 0
     if args.file:
         try:
             with open(args.file, encoding="utf-8") as f:
@@ -479,22 +572,32 @@ def cmd_apply_block(args):
     else:
         text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
     blocks = parse_blocks(text)
-    seen = set()
+    seen = {}
     plan = []
     for b in blocks:  # validate everything before writing anything
-        item = validate_block(b, seen)
-        seen.add(item["full"])
+        item = validate_block(b, seen, state)
+        seen[item["full"]] = item.get("verdict")
         plan.append(item)
+    if silent:
+        check_block_silence_note(plan)
     for b, item in zip(blocks, plan):
         full = item["full"]
         os.makedirs(os.path.dirname(full), exist_ok=True)
         if item["kind"] == "goals.md":
-            write_version(full, goals_body(item["given"]))
+            append_entry(full, reason_entry(goals_body(item["given"]), item["reason"]))
         elif item["kind"] != "log":
-            write_version(full, item["body"])
+            append_entry(full, reason_entry(item["body"], item["reason"]))
         else:
             append_entry(full, item["body"] + "\n", blank_line=False)
-    emit({"applied": [{"file": b["file"], "mode": b["mode"]} for b in blocks]})
+    out = {"applied": [{"file": b["file"], "mode": b["mode"]} for b in blocks]}
+    if any(b["file"].startswith("log/") for b in blocks):
+        # verdicts may have changed: back-fill and recompute exactly as checkin does
+        state = backfill_unrecorded(load_state())
+        recount_unrecorded(state)
+        recompute_drift(state)
+        save_state(state)
+        out["streak"] = streak_view(state)
+    emit(out)
 # ---- plan: change vision / anti-vision / goals sections (PROTOCOL.md s.6) ----
 # object -> (append target, goals section title or None)
 PLAN_OBJECTS = {
@@ -529,7 +632,7 @@ def cmd_plan_change(args):
         body = text
     path = os.path.join(data_dir(), APPEND_TARGETS[target])
     date = now().date().isoformat()
-    append_entry(path, "## %s\n%s\n_Reason: %s_\n" % (date, body, why))
+    append_entry(path, reason_entry(body, why))
     emit({"object": args.object, "date": date, "old": old, "new": text,
           "why": why, "versions": len(read_versions(target))})
 
@@ -705,6 +808,72 @@ def segment_file(state):
     return name
 
 
+FIRST_VERSION_REASON = "来自一天协议"
+REDO_VERSION_REASON = "来自重做的一天协议"
+
+
+def segment_answers(state):
+    """Latest answer per question id in the running segment (verbatim)."""
+    answers = {}
+    for name in proto_of(state)["files"]:
+        path = os.path.join(protocol_dir(), name)
+        if not os.path.isfile(path):
+            continue
+        qid = None
+        with open(path, encoding="utf-8") as f:
+            for line in f.read().split("\n"):
+                m = re.match(r"^## (\S+)[ \t]*$", line)
+                if m:
+                    qid = m.group(1)
+                    answers[qid] = []
+                elif qid is not None:
+                    answers[qid].append(line)
+    return {k: "\n".join(v).strip() for k, v in answers.items()}
+
+
+def first_version_entries(answers, redo):
+    """(append target, entry text) pairs built only from the user's answers."""
+    for qid in ("1.13", "3.3", "3.4", "3.5", "3.6", "3.7", "3.constraints"):
+        if not answers.get(qid):
+            raise CliError("cannot write the plan files: no answer recorded for %s" % qid)
+    reason = REDO_VERSION_REASON if redo else FIRST_VERSION_REASON
+    date = now().date().isoformat()
+    goals = {"Year Goal": answers["3.5"], "Month Project": answers["3.6"],
+             "Daily Levers": answers["3.7"], "Constraints": answers["3.constraints"]}
+    bodies = [
+        ("anti-vision", answers["3.3"]),
+        ("vision", "%s\n\nIdentity Statement: %s" % (answers["3.4"], answers["1.13"])),
+        ("goals", goals_text(goals)),
+    ]
+    return [(t, "## %s\n%s\n_Reason: %s_\n" % (date, b, reason)) for t, b in bodies]
+
+
+def write_group(entries):
+    """Append every (path, entry) or none: undo the appends already done on failure."""
+    undo = []
+    try:
+        for path, entry in entries:
+            size = os.path.getsize(path) if os.path.isfile(path) else None
+            undo.append((path, size))
+            append_entry(path, entry, sync=True)
+    except (OSError, UnicodeError) as e:
+        rollback_group(undo)
+        raise CliError("could not write the plan files (nothing was written): %s" % e)
+    return undo
+
+
+def rollback_group(undo):
+    for path, size in reversed(undo):
+        try:
+            if size is None:
+                if os.path.isfile(path):
+                    os.remove(path)
+            else:
+                os.truncate(path, size)
+        except OSError:
+            pass
+
+
 def cmd_protocol_answer(args):
     state = refresh(load_state())
     p = proto_of(state)
@@ -722,11 +891,25 @@ def cmd_protocol_answer(args):
     if args.text is None:
         raise CliError("--text is required")
     body = check_body(args.text, "--text", r"^## ")
-    name = segment_file(state)
-    os.makedirs(protocol_dir(), exist_ok=True)
-    path = os.path.join(protocol_dir(), name)
-    append_entry(path, "## %s\n%s\n" % (qid, body), sync=True)
     i = QUESTIONS.index(qid)
+    last = i + 1 >= len(QUESTIONS)
+    undo = []
+    if last:
+        # Final answer: write the first plan version from the user's own words,
+        # all files or none, before the answer is recorded and phase flips.
+        answers = segment_answers(state)
+        answers[qid] = body
+        entries = first_version_entries(answers, p["redo"])
+        undo = write_group([(os.path.join(data_dir(), APPEND_TARGETS[t]), e)
+                            for t, e in entries])
+    name = segment_file(state)
+    try:
+        os.makedirs(protocol_dir(), exist_ok=True)
+        path = os.path.join(protocol_dir(), name)
+        append_entry(path, "## %s\n%s\n" % (qid, body), sync=True)
+    except OSError as e:
+        rollback_group(undo)
+        raise CliError("could not record the answer (nothing was written): %s" % e)
     p["last_activity"] = now().isoformat()
     if i + 1 < len(QUESTIONS):
         p["question"] = QUESTIONS[i + 1]
@@ -751,6 +934,8 @@ def cmd_protocol_answer(args):
 VERDICTS = ("在轨", "轻微偏离", "走偏")
 VERDICT_RE = re.compile(r"^- 判定: (.+?)[ \t]*$")
 REVISION_RE = re.compile(r"^- 改判: .+? → (.+?) — 因 ")
+AWAY_PREFIX = "- 这几天发生了什么:"  # written by `checkin record --while-away`
+AWAY_RE = re.compile(r"^" + re.escape(AWAY_PREFIX) + r"[ \t]*(.*)$")
 
 
 def log_path(date):
@@ -800,11 +985,68 @@ def yes_no(value):
     return "是" if value == "yes" else "否"
 
 
-def check_verdict(value):
-    verdict = one_line(value, "--verdict")
+def check_verdict(value, label="--verdict"):
+    verdict = one_line(value, label)
     if verdict not in VERDICTS:
-        raise CliError("--verdict must be one of: %s" % " / ".join(VERDICTS))
+        raise CliError("%s must be one of: %s" % (label, " / ".join(VERDICTS)))
     return verdict
+
+
+def check_verdict_change(current, verdict, day="today", block_hint=False):
+    """The same-day rule shared by `checkin record` and update blocks: an
+    existing verdict can only change through a 改判 with a new fact."""
+    if current is not None and current != verdict:
+        msg = ("a check-in with verdict %s is already recorded %s; changing "
+               "the verdict needs a new fact: use `checkin revise-verdict "
+               "--new-fact \"...\" --verdict ...`" % (current, day))
+        if block_hint:
+            msg += (" (in an update block: a '- 改判: %s → %s — 因 <new fact> "
+                    "事实改判' line)" % (current, verdict))
+        raise CliError(msg)
+
+
+# Full 改判 line as `checkin revise-verdict` writes it (time suffix optional).
+REVISION_FULL_RE = re.compile(
+    r"^- 改判: (.+?) → (.+?) — 因 (\S.*?) 事实改判(?: \(\d\d:\d\d:\d\d\))?\s*$")
+VERDICT_LIKE_RE = re.compile(r"^\s*- (判定|改判)\s*[:：]")
+
+
+def check_block_verdicts(n, rel, body, current):
+    """Validate the verdict lines of a block bound for log/YYYY-MM-DD.md with
+    the check-in rules. `current` is the day's verdict before the block;
+    returns the day's verdict after it."""
+    label = "block %d (%s)" % (n, rel)
+    lines = body.split("\n")
+    for i, line in enumerate(lines):
+        m = VERDICT_RE.match(line)
+        if m:
+            verdict = check_verdict(m.group(1), label + ": 判定")
+            check_verdict_change(current, verdict, "for this day", True)
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            rm = re.match(r"^- 判定理由: (.*)$", nxt)
+            if not rm:
+                raise CliError("%s: '- 判定: %s' must be followed directly by a "
+                               "'- 判定理由: <reason>' line" % (label, verdict))
+            one_line(rm.group(1), label + ": 判定理由")
+            current = verdict
+            continue
+        m = REVISION_FULL_RE.match(line)
+        if m:
+            previous = check_verdict(m.group(1), label + ": 改判 old verdict")
+            verdict = check_verdict(m.group(2), label + ": 改判 new verdict")
+            if current is None:
+                raise CliError("%s: no check-in recorded that day: nothing to revise" % label)
+            if previous != current:
+                raise CliError("%s: 改判 says the old verdict was %s but the day's "
+                               "current verdict is %s" % (label, previous, current))
+            current = verdict
+            continue
+        if VERDICT_LIKE_RE.match(line) and not line.startswith("- 判定理由:"):
+            raise CliError(
+                "%s: malformed verdict line %r (expected '- 判定: 在轨|轻微偏离|走偏' "
+                "followed by '- 判定理由: ...', or '- 改判: <old> → <new> — 因 "
+                "<new fact> 事实改判')" % (label, line))
+    return current
 
 
 def cmd_checkin_record(args):
@@ -831,11 +1073,7 @@ def cmd_checkin_record(args):
     if os.path.isfile(log_path(date)):
         with open(log_path(date), encoding="utf-8") as f:
             current = current_verdict(f.read())
-        if current is not None and current != verdict:
-            raise CliError(
-                "a check-in with verdict %s is already recorded today; changing "
-                "the verdict needs a new fact: use `checkin revise-verdict "
-                "--new-fact \"...\" --verdict ...`" % current)
+        check_verdict_change(current, verdict)
     done = one_line(args.levers_done, "--levers-done")
     action_reason = one_line(args.action_reason, "--action-reason")
     identity_reason = one_line(args.identity_reason, "--identity-reason")
@@ -851,7 +1089,7 @@ def cmd_checkin_record(args):
         "- 判定理由: %s" % verdict_reason,
     ]
     if away:
-        lines.append("- 这几天发生了什么: %s" % one_line(away, "--while-away"))
+        lines.append("%s %s" % (AWAY_PREFIX, one_line(away, "--while-away")))
     path = log_path(date)
     if os.path.isfile(path) and os.path.getsize(path) > 0:
         head = "## %s 再次打卡" % t.strftime("%H:%M:%S")
@@ -932,6 +1170,28 @@ def log_verdicts():
     return out
 
 
+def recount_unrecorded(state):
+    """Unrecorded = the trailing run of days whose log holds only the
+    '- 未记录' placeholder. Any verdict (from `checkin record` or an update
+    block) ends the run, which is what `checkin record` does by resetting the
+    counter to 0. DND days are skipped."""
+    folder = os.path.join(data_dir(), "log")
+    run = 0
+    if os.path.isdir(folder):
+        for name in sorted(os.listdir(folder)):
+            if not re.match(r"^\d{4}-\d{2}-\d{2}\.md$", name):
+                continue
+            with open(os.path.join(folder, name), encoding="utf-8") as f:
+                text = f.read()
+            if current_verdict(text) is not None:
+                run = 0
+            elif (name[:-3] not in state["dnd_dates"]
+                  and UNRECORDED_LINE in text.split("\n")):
+                run += 1
+    state["streak"]["unrecorded"] = run
+    update_escalation(state)
+
+
 def recompute_drift(state):
     """Consecutive trailing 走偏 days; Unrecorded and DND days are skipped
     (they neither count nor break the run); any other verdict resets to 0."""
@@ -950,32 +1210,54 @@ def update_escalation(state):
                            or st["unrecorded"] >= ESCALATION_AT)
 
 
-def backfill_unrecorded(state):
+def pending_unrecorded(state):
+    """Read-only: (days that back-fill would mark unrecorded, new cursor), or
+    ([], None) when there is no cursor. The single source of the back-fill
+    rules: backfill_unrecorded writes exactly these days, and push planning
+    counts them in memory."""
     today = now().date()
     cursor = state.get("streak_cursor")
     if cursor is None:
-        return state
+        return [], None
     day = datetime.datetime.strptime(cursor, "%Y-%m-%d").date() + datetime.timedelta(days=1)
     verdicts = dict(log_verdicts())
+    days = []
     while day < today:
         d = day.isoformat()
-        has_checkin = verdicts.get(d) is not None
-        if d not in state["dnd_dates"] and not has_checkin:
-            header = "# %s\n" % d
-            existing = ""
-            if os.path.isfile(log_path(d)):
-                with open(log_path(d), encoding="utf-8") as f:
-                    existing = f.read()
-            if re.search(r"(?m)^# %s[ \t]*$" % re.escape(d), existing):
-                header = ""
-            append_log(d, "%s%s\n" % (header, UNRECORDED_LINE))
-            state["streak"]["unrecorded"] += 1
+        if d not in state["dnd_dates"] and verdicts.get(d) is None:
+            days.append(d)
         day += datetime.timedelta(days=1)
-    state["streak_cursor"] = max(
-        cursor, (today - datetime.timedelta(days=1)).isoformat())
+    return days, max(cursor, (today - datetime.timedelta(days=1)).isoformat())
+
+
+def backfill_unrecorded(state):
+    days, new_cursor = pending_unrecorded(state)
+    if new_cursor is None:
+        return state
+    for d in days:
+        header = "# %s\n" % d
+        existing = ""
+        if os.path.isfile(log_path(d)):
+            with open(log_path(d), encoding="utf-8") as f:
+                existing = f.read()
+        if re.search(r"(?m)^# %s[ \t]*$" % re.escape(d), existing):
+            header = ""
+        append_log(d, "%s%s\n" % (header, UNRECORDED_LINE))
+        state["streak"]["unrecorded"] += 1
+    state["streak_cursor"] = new_cursor
     update_escalation(state)
     save_state(state)
     return state
+
+
+def with_pending_unrecorded(state):
+    """A copy of `state` whose unrecorded count includes the days a back-fill
+    would add. Writes nothing; never save the copy."""
+    view = copy.deepcopy(state)
+    days, _cursor = pending_unrecorded(view)
+    view["streak"]["unrecorded"] += len(days)
+    update_escalation(view)
+    return view
 
 
 def streak_view(state):
@@ -1063,8 +1345,10 @@ def plan_changes(first, last):
         prev = None
         for v in read_versions(target):
             # a file's first version is the initial plan unless it carries a
-            # plan-change reason; every later version is a change
-            is_change = prev is not None or "reason" in v
+            # plan-change reason; every later version is a change. The
+            # protocol's own first version is the initial plan, not a change.
+            is_change = prev is not None or (
+                "reason" in v and v["reason"] != FIRST_VERSION_REASON)
             if is_change and first.isoformat() <= v["date"] <= last.isoformat():
                 item = {"object": target, "date": v["date"],
                         "reason": v.get("reason")}
@@ -1309,16 +1593,59 @@ def build_plan(state, date):
 
 
 def notify_state():
-    state = refresh(load_state())
+    """Persisted state for pushes. Read-only with respect to log/ and the
+    streak counters: pushes never back-fill (see with_pending_unrecorded)."""
+    return refresh(load_state())
+
+
+def push_view(state):
+    """State as the planner sees it: unrecorded days counted in memory."""
     if state["phase"] == "active":
-        state = backfill_unrecorded(state)
+        return with_pending_unrecorded(state)
     return state
+
+
+PUSH_LOG_NAME = "push.log"
+PUSH_LOG_MAX_BYTES = 64 * 1024
+PUSH_LOG_KEEP_LINES = 500
+
+
+def push_log_path():
+    return os.path.join(data_dir(), PUSH_LOG_NAME)
+
+
+def trim_push_log(path, max_bytes=PUSH_LOG_MAX_BYTES, keep=PUSH_LOG_KEEP_LINES):
+    """Size cap: over max_bytes, keep only the last `keep` lines."""
+    try:
+        if os.path.getsize(path) <= max_bytes:
+            return
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines(True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(lines[-keep:])
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def log_push(slot, outcome):
+    """One line per fire attempt: timestamp, slot, outcome. Only fixed words
+    and error text from this program; never user-authored text. Logging must
+    not break a push."""
+    line = "%s %s %s\n" % (now().strftime("%Y-%m-%dT%H:%M:%S"), slot, outcome)
+    try:
+        append_entry(push_log_path(), line, blank_line=False)
+        trim_push_log(push_log_path())
+    except OSError:
+        pass
 
 
 def cmd_notify_plan(args):
     state = notify_state()
+    view = push_view(state)
     date = check_date(args.date) if args.date else now().date().isoformat()
-    pushes, why = build_plan(state, date)
+    pushes, why = build_plan(view, date)
     for p in pushes:
         p["text"] = push_text(p["slot"], date, state, p.get("question"))
     out = {"date": date, "pushes": pushes}
@@ -1397,19 +1724,22 @@ def cfg_sent(state):
 
 def cmd_notify_fire(args):
     state = notify_state()
+    view = push_view(state)  # in-memory unrecorded count; `state` is what is saved
     now_dt = now()
     date = now_dt.date().isoformat()
-    pushes, why = build_plan(state, date)
+    pushes, why = build_plan(view, date)
     entry = next((p for p in pushes if p["slot"] == args.slot), None)
     result = {"slot": args.slot, "date": date, "dry_run": bool(args.dry_run),
               "fired": False}
     if entry is None:
         result["skipped"] = why or "not in today's plan"
+        log_push(args.slot, "skipped: " + result["skipped"])
         emit(result)
         return
     sent = cfg_sent(state)
     if args.tick and sent.get(args.slot) == date:
         result["skipped"] = "already sent today"
+        log_push(args.slot, "skipped: " + result["skipped"])
         emit(result)
         return
     if args.tick:
@@ -1417,6 +1747,7 @@ def cmd_notify_fire(args):
             date + " " + entry["time"], "%Y-%m-%d %H:%M")
         if not (0 <= (now_dt - at).total_seconds() < TICK_SECONDS):
             result["skipped"] = "not due yet"
+            log_push(args.slot, "skipped: " + result["skipped"])
             emit(result)
             return
     cfg = notify_config(state)
@@ -1424,7 +1755,7 @@ def cmd_notify_fire(args):
     source = "template"
     # AI only for the evening reminder, and only when notify.ai is on.
     if args.slot == "evening" and cfg["ai"]:
-        prompt = ai_prompt(state, date)
+        prompt = ai_prompt(view, date)
         try:
             cmd = client_command(cfg["client"], prompt)
         except (CliError, ValueError):
@@ -1446,6 +1777,12 @@ def cmd_notify_fire(args):
             save_state(state)
         except (OSError, subprocess.SubprocessError):
             result["error"] = "display command failed"
+    if result.get("error"):
+        log_push(args.slot, "failed: " + result["error"])
+    elif args.dry_run:
+        log_push(args.slot, "dry-run")
+    else:
+        log_push(args.slot, "sent")
     emit(result)
 
 
@@ -1483,6 +1820,8 @@ def launchd_jobs(state):
         argv = [sys.executable, script, "notify", "fire", slot]
         job = {"Label": LAUNCHD_PREFIX + slot,
                "EnvironmentVariables": env,
+               "StandardOutPath": push_log_path(),
+               "StandardErrorPath": push_log_path(),
                "RunAtLoad": False}
         if slot == "random":
             # launchd cannot fire at a random time: tick through the day and
@@ -1515,7 +1854,8 @@ def cmd_notify_launchd(args):
                  for j in jobs]
     else:
         shown = [{"label": j["label"], "path": j["path"]} for j in jobs]
-    out = {"dry_run": bool(args.dry_run), "jobs": shown, "commands": cmds}
+    out = {"dry_run": bool(args.dry_run), "jobs": shown, "commands": cmds,
+           "log_path": push_log_path()}
     if action == "uninstall":
         out["remove_files"] = [j["path"] for j in jobs]
     if args.dry_run:

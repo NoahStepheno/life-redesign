@@ -300,6 +300,23 @@ def write_version(path, body):
     append_entry(path, "## %s\n%s\n" % (now().date().isoformat(), body))
 
 
+def reason_entry(body, reason):
+    """Text of a plan version that carries a reason (shared by `plan change`
+    and update blocks): `## <date>`, body, final `_Reason: <why>_` line."""
+    return "## %s\n%s\n_Reason: %s_\n" % (now().date().isoformat(), body, reason)
+
+
+def split_reason(body):
+    """Split an update-block body into (content, reason): the body must END
+    with a non-empty `_Reason: <why>_` line. Returns (None, None) otherwise."""
+    content, _, last = body.rstrip().rpartition("\n")
+    m = REASON_RE.match(last.strip())
+    reason = " ".join(m.group(1).split()) if m else ""
+    if not reason:
+        return None, None
+    return content, reason
+
+
 def goals_text(sections):
     """Render goals sections (title -> body) in canonical order."""
     return "\n\n".join("### %s\n%s" % (t, sections[t])
@@ -432,6 +449,20 @@ def validate_block(b, seen):
     if not body.strip():
         raise CliError("block %d: body is empty" % n)
     exists = os.path.exists(full) or full in seen
+    reason = None
+    if b["file"] in APPEND_TARGETS.values():
+        # plan files: a change needs a why, exactly as `plan change` (issue #22)
+        body, reason = split_reason(body)
+        if reason is None:
+            raise CliError(
+                "block %d: %s needs a reason: end the block with a non-empty "
+                "line '_Reason: <why this is changing>_'" % (n, b["file"]))
+        if not body.strip():
+            raise CliError("block %d: body is empty" % n)
+        if os.path.isfile(full) and full not in seen:
+            with open(full, encoding="utf-8") as f:
+                if not f.read().strip():
+                    exists = False  # an empty plan file takes a first version
     if b["mode"] == "create" and exists:
         raise CliError("block %d: cannot create %s: file already exists "
                        "(use mode: append)" % (n, b["file"]))
@@ -474,9 +505,11 @@ def validate_block(b, seen):
         for name, v in sections.items():
             given[name] = check_body("\n".join(v), "block %d section %r" % (n, name),
                                      r"^#{1,3} ")
-        return {"full": full, "kind": kind, "mode": b["mode"], "given": given}
+        return {"full": full, "kind": kind, "mode": b["mode"], "given": given,
+                "reason": reason}
     body = check_body(body, "block %d body" % n, r"^## ")
-    return {"full": full, "kind": kind, "mode": b["mode"], "body": body}
+    return {"full": full, "kind": kind, "mode": b["mode"], "body": body,
+            "reason": reason}
 
 
 def cmd_apply_block(args):
@@ -500,9 +533,9 @@ def cmd_apply_block(args):
         full = item["full"]
         os.makedirs(os.path.dirname(full), exist_ok=True)
         if item["kind"] == "goals.md":
-            write_version(full, goals_body(item["given"]))
+            append_entry(full, reason_entry(goals_body(item["given"]), item["reason"]))
         elif item["kind"] != "log":
-            write_version(full, item["body"])
+            append_entry(full, reason_entry(item["body"], item["reason"]))
         else:
             append_entry(full, item["body"] + "\n", blank_line=False)
     out = {"applied": [{"file": b["file"], "mode": b["mode"]} for b in blocks]}
@@ -548,7 +581,7 @@ def cmd_plan_change(args):
         body = text
     path = os.path.join(data_dir(), APPEND_TARGETS[target])
     date = now().date().isoformat()
-    append_entry(path, "## %s\n%s\n_Reason: %s_\n" % (date, body, why))
+    append_entry(path, reason_entry(body, why))
     emit({"object": args.object, "date": date, "old": old, "new": text,
           "why": why, "versions": len(read_versions(target))})
 

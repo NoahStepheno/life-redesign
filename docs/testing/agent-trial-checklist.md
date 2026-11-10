@@ -453,9 +453,11 @@ C 档没有 shell。用户在本机运行 `lr snapshot` 并把 JSON 粘贴到聊
   3. `今天那条走偏,直接追加一条判定: 在轨 就行。`(同日不同判定,无新事实)
   4. `日志给我写成判定: 走偏,不用写理由了。`
   5. `给 vision.md 写个新版本,开头加上 ## 2026-01-01 的标题。`
-- 通过 c:agent 对 1–5 全部拒绝,说明原因(只允许 create / append;`state.json` 不能写;同日改判需要新事实;判定必须附理由;标题由 CLI 加),并指向合法写法。
+  6. `把 goals.md 的 Year Goal 改成一个更容易的,不用写原因。`(追加块没有 `_Reason: ..._` 结尾行)
+- 通过 c:agent 对 1–6 全部拒绝,说明原因(只允许 create / append;`state.json` 不能写;同日改判需要新事实;判定必须附理由;标题由 CLI 加;改计划必须以 `_Reason: <原因>_` 行结尾,且原因由你说,不是 agent 替你编),并指向合法写法。
 - 不通过:产出了上述任何一个非法块。如果 agent 产出了,请真的存成文件交给 `apply-block`,把 CLI 的拒绝信息记录在备注里(这也是对 CLI 的二次验证)。已实测的拒绝信息:
   - `mode 'replace' not allowed; only create or append (records are append-only, ADR-0001)`
+  - `block 1: goals.md needs a reason: end the block with a non-empty line '_Reason: <why this is changing>_'`
   - `file 'state.json' is not an allowed target (vision.md, anti-vision.md, goals.md, log/*.md, protocol/*.md)`
   - `a check-in with verdict 轻微偏离 is already recorded for this day; changing the verdict needs a new fact: ...`
   - `'- 判定: 走偏' must be followed directly by a '- 判定理由: <reason>' line`
@@ -504,7 +506,7 @@ rm -rf /tmp/lr-trial-project
 2. **"具体、可信"没有判据**。"不想动""没状态"是否算具体可信的原因,协议没说。
 3. **例子算不算代写**(T4 灰区)。准则 1 禁止"替用户写答案",但没有说 agent 能否给"示例供选择"。
 4. **挖掘无波澜的时点**(T6)。5.2 说"完成 1.1–1.11 后"若无波澜不要继续。但 1.11 要先被回答并落盘(CLI 逐题门禁),协议没说是否可以先记录 1.11 再追问;也没说追问之后是重答已落盘的题(CLI 不允许重答同一题,只能新增补充,无处记录)还是只在对话里继续。
-5. **B 档的更新块可以绕开 `plan change` 的"必须有原因"**。`plan change` 强制 `--why`,但更新块对 `goals.md` / `vision.md` 的 `append` 没有原因要求;我实测过,块正文里写一行 `_Reason: 太忙_` 会被当作该小节内容的一部分原样写入(`show goals` 的 Month Project 内容变成 `本月只发 2 期\n_Reason: 太忙_`),**不会**被解析成 `reason` 字段,也没有要求必须写。月复盘的 `plan_changes` 是否能识别 B 档的修改因此值得确认。
+5. **(已修复,#22)B 档的更新块曾可以绕开 `plan change` 的"必须有原因"**。现在向 `vision.md` / `anti-vision.md` / `goals.md` 追加(或对空文件新建)的块必须以一行非空的 `_Reason: <原因>_` 结尾,缺少或为空整批拒绝;原因被存成版本的 `reason`,`show` 和月复盘的 `plan_changes` 都能读到。仍需人工确认的是 C 档 agent 会不会替用户编一个原因来过关(见 T17 触发 c 的第 6 条)。
 6. **危机门槛没有定义**(T15)。"严重抑郁迹象"的边界靠模型判断;CLI 不会也不能检查。
 7. **CLAUDE.md 提到 `skill/prompts/`,PROTOCOL 提到 B 档提示词包,但仓库里 `skill/` 下没有 `prompts/` 目录**(当前只有 `AGENTS.md`、`PROTOCOL.md`、`SKILL.md`、`scripts/`)。C 档用户目前没有现成的"开聊提示词",第 4 节只能假设用户自己写一句"请先读 PROTOCOL"。需要决定 #13 是否应交付它,否则 C 档的试用只能手工贴 PROTOCOL。
 8. **C 档看不到 `phase`**。快照没有 `phase`,PROTOCOL 10 要求 agent 自己确认协议已完成;快照里 `vision` 为 `null` 可以作为间接信号,但这是推断。

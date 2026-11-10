@@ -80,14 +80,14 @@ class ApplyBlockTest(CliTestCase):
     def test_append_vision_adds_dated_version(self):
         self.run_cli("append", "vision", "--text", "old")
         self.set_now("2026-04-02T09:00:00")
-        r = self.apply(block("vision.md", "append", "new"))
+        r = self.apply(block("vision.md", "append", "new\n_Reason: why_"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.read_data("vision.md"),
-                         "## 2026-01-15\nold\n\n## 2026-04-02\nnew\n")
+                         "## 2026-01-15\nold\n\n## 2026-04-02\nnew\n_Reason: why_\n")
 
     def test_append_goals_merges_sections(self):
         self.run_cli("append", "goals", "--year-goal", "YG", "--constraints", "C")
-        r = self.apply(block("goals.md", "append", "### Month Project\nMP"))
+        r = self.apply(block("goals.md", "append", "### Month Project\nMP\n_Reason: r_"))
         self.assertEqual(r.returncode, 0, r.stderr)
         cur = self.run_cli("show", "goals").json()["current"]["sections"]
         self.assertEqual(cur, {"Year Goal": "YG", "Month Project": "MP", "Constraints": "C"})
@@ -109,7 +109,7 @@ class ApplyBlockTest(CliTestCase):
             ("=== LIFE-REDESIGN UPDATE ===\nfile: log/a.md\nmode: create\n---\nx\n", "END"),
             (block("log/a.md", "create", "  "), "empty"),
             (block("state.json", "append", "x"), "not an allowed"),
-            (block("goals.md", "append", "no heading"), "section"),
+            (block("goals.md", "append", "no heading\n_Reason: r_"), "section"),
         ]
         for text, reason in cases:
             r = self.apply(text)
@@ -136,11 +136,11 @@ class ApplyBlockTest(CliTestCase):
 
     def test_multi_block_success(self):
         text = (block("log/2026-01-16.md", "create", "a")
-                + "chatter between\n" + block("vision.md", "append", "v"))
+                + "chatter between\n" + block("vision.md", "append", "v\n_Reason: r_"))
         r = self.apply(text)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(self.read_data("log", "2026-01-16.md"), "a\n")
-        self.assertEqual(self.read_data("vision.md"), "## 2026-01-15\nv\n")
+        self.assertEqual(self.read_data("vision.md"), "## 2026-01-15\nv\n_Reason: r_\n")
 
     def test_reads_from_file(self):
         p = os.path.join(self._tmp, "blk.txt")
@@ -320,3 +320,68 @@ class VerdictBlockTest(ActiveCliTestCase):
         r = self.apply(self.verdict_block(16, "在轨", mode="append"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.json()["streak"]["unrecorded"], 2)
+
+
+class PlanBlockReasonTest(ActiveCliTestCase):
+    """Update blocks that change vision/anti-vision/goals carry a reason,
+    stored exactly as `plan change` stores it (issue #22)."""
+
+    def setUp(self):
+        super().setUp()
+        self.set_now("2026-01-20T09:00:00")
+
+    def apply(self, text):
+        return CliResult(subprocess.run(
+            [sys.executable, CLI, "apply-block"], input=text,
+            env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True))
+
+    def test_missing_or_blank_reason_rejected_file_unchanged(self):
+        for f in ("vision.md", "anti-vision.md", "goals.md"):
+            before = self.read_data(f)
+            body = "### Year Goal\nNEW-EASIER-GOAL" if f == "goals.md" else "easier"
+            for tail in ("", "\n_Reason: _", "\n_Reason:   _", "\n_Reason: x_\nmore"):
+                r = self.apply(block(f, "append", body + tail))
+                self.assertNotEqual(r.returncode, 0, (f, tail))
+                self.assertIn("reason", r.stderr)
+                self.assertEqual(self.read_data(f), before)
+
+    def test_valid_reason_stored_as_reason_and_reviewed(self):
+        r = self.apply(block("goals.md", "append",
+                             "### Year Goal\nNEW\n_Reason: scope grew_"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        cur = self.run_cli("show", "goals").json()["current"]
+        self.assertEqual(cur["reason"], "scope grew")
+        self.assertEqual(cur["sections"]["Year Goal"], "NEW")
+        rev = self.run_cli("review", "month").json()
+        self.assertEqual([(c["object"], c["reason"]) for c in rev["plan_changes"]],
+                         [("goals", "scope grew")])
+
+    def test_block_and_plan_change_make_identical_versions(self):
+        r = self.apply(block("vision.md", "append", "V2\n_Reason: why_"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        via_block = self.read_data("vision.md")
+        self.setUp()
+        r = self.run_cli("plan", "change", "vision", "--text", "V2", "--why", "why")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.read_data("vision.md"), via_block)
+
+    def test_create_into_empty_plan_file_needs_reason(self):
+        self.write_data("", "vision.md")
+        r = self.apply(block("vision.md", "create", "V"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.read_data("vision.md"), "")
+        r = self.apply(block("vision.md", "create", "V\n_Reason: first_"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.run_cli("show", "vision").json()["current"]["reason"], "first")
+
+    def test_missing_reason_rejects_whole_batch(self):
+        before = self.read_data("vision.md")
+        r = self.apply(block("vision.md", "append", "V\n_Reason: ok_")
+                       + block("anti-vision.md", "append", "AV"))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.read_data("vision.md"), before)
+
+    def test_log_blocks_need_no_reason(self):
+        r = self.apply(block("log/2026-01-20.md", "create", "note"))
+        self.assertEqual(r.returncode, 0, r.stderr)

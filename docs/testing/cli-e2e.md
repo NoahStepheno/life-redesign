@@ -818,7 +818,7 @@ error: block 1: cannot create log/2026-02-01-note.md: file already exists (use m
 补充一句。
 ```
 
-对 `vision.md`、`anti-vision.md`、`goals.md` 的 `append` 块是追加一个新的带日期版本(CLI 写标题),`goals.md` 的块必须按小节写,没写的小节会从当前版本带过来:
+对 `vision.md`、`anti-vision.md`、`goals.md` 的 `append` 块是追加一个新的带日期版本(CLI 写标题),`goals.md` 的块必须按小节写,没写的小节会从当前版本带过来。这是计划变更,**块必须以一行非空的 `_Reason: <原因>_` 结尾**(与 `plan change` 存原因的格式相同,存成版本的原因,`show` 和复盘都读得到);缺少或为空会被拒绝,什么都不写:
 
 ```sh
 lr apply-block <<'EOF'
@@ -826,16 +826,39 @@ lr apply-block <<'EOF'
 file: goals.md
 mode: append
 ---
+### Year Goal
+更容易的年度目标
+=== END ===
+EOF
+lr apply-block <<'EOF'
+=== LIFE-REDESIGN UPDATE ===
+file: goals.md
+mode: append
+---
+### Year Goal
+更容易的年度目标
+_Reason: _
+=== END ===
+EOF
+lr apply-block <<'EOF'
+=== LIFE-REDESIGN UPDATE ===
+file: goals.md
+mode: append
+---
 ### Month Project
 做出可收费的第一版
+_Reason: 原型已完成,下一步是收费验证_
 === END ===
 EOF
 tail -14 "$LIFE_REDESIGN_HOME/goals.md"
 ```
 
 ```output
+error: block 1: goals.md needs a reason: end the block with a non-empty line '_Reason: <why this is changing>_'
+[exit 1]
+error: block 1: goals.md needs a reason: end the block with a non-empty line '_Reason: <why this is changing>_'
+[exit 1]
 {"applied": [{"file": "goals.md", "mode": "append"}]}
-
 ## 2026-02-01
 ### Year Goal
 年底前拿到第一个付费用户
@@ -849,6 +872,7 @@ tail -14 "$LIFE_REDESIGN_HOME/goals.md"
 ### Daily Levers
 写 500 字
 跑步 20 分钟
+_Reason: 原型已完成,下一步是收费验证_
 ```
 
 写入 `log/` 的块如果含判定,走和 `checkin` 同样的规则,并按日志重算连续走偏与连续未记录(结果在 `streak` 字段里返回,与 `streak status` 一致)。新判定必须是 `- 判定: <在轨|轻微偏离|走偏>` 后紧跟 `- 判定理由: <理由>`;缺理由、判定值非法、对已有判定的一天追加不同的判定都会整批拒绝。改判要用带新事实的一行 `- 改判: <原判定> → <新判定> — 因 <新事实> 事实改判`:
@@ -949,6 +973,7 @@ file: vision.md
 mode: create
 ---
 x
+_Reason: x_
 === END ===
 EOF
 ```
@@ -1077,6 +1102,7 @@ mode: append
 ---
 ## 2020-01-01
 伪造的旧版本
+_Reason: x_
 === END ===
 EOF
 lr apply-block <<'EOF'
@@ -1086,6 +1112,7 @@ mode: append
 ---
 ### Hobbies
 x
+_Reason: x_
 === END ===
 EOF
 lr apply-block <<'EOF'
@@ -1094,6 +1121,7 @@ file: goals.md
 mode: append
 ---
 没有小节标题
+_Reason: x_
 === END ===
 EOF
 lr apply-block <<'EOF'

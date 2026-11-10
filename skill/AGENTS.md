@@ -44,4 +44,4 @@ python3 "<skill_dir>/scripts/life_redesign.py" <命令> [参数]
 - 只追加、不覆盖、不删除。
 - 出现危机迹象时停止按协议追问,建议寻求专业帮助。
 - 通知不含私人内容;无头(后台)调用只读不写,不产生判定。
-- 无 shell 的纯聊天 App:用 `LR snapshot` 的快照开聊,结束时产出更新块,由用户 `LR apply-block` 应用;更新块里的判定与 `checkin` 同规则并计入连续走偏(改判用带新事实的 `- 改判:` 行)(PROTOCOL 第 10 节)。
+- 无 shell 的纯聊天 App:用 `LR snapshot` 的快照开聊,结束时产出更新块,由用户 `LR apply-block` 应用;更新块里的判定与 `checkin` 同规则并计入连续走偏(改判用带新事实的 `- 改判:` 行);改 Anti-vision / Vision / 目标的块必须以非空的 `_Reason: <原因>_` 行结尾,否则整批拒绝(PROTOCOL 第 10 节)。

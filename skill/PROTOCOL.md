@@ -459,6 +459,7 @@ CLI 对更新块的规则(违反则整批拒绝,什么都不写,先全部校验�
 - `file` 只允许 `vision.md`、`anti-vision.md`、`goals.md`、`log/*.md`、`protocol/*.md`;绝对路径、`..`、逃出数据目录的路径一律拒绝。`state.json` 不能写。
 - 正文不能为空。
 - `log/*.md` 与 `protocol/*.md`:`create` 要求文件不存在(`cannot create <file>: file already exists (use mode: append)`),`append` 要求文件已存在(`cannot append to <file>: file does not exist (use mode: create)`),内容原样追加到末尾。
+- `vision.md` / `anti-vision.md` / `goals.md`(**计划变更,必须带原因**):块必须以一行非空的 `_Reason: <为什么改>_` 作为最后一行(与 `plan change --why` 存原因的格式相同,单行,原因文字里的空白会被压成单个空格)。缺少、为空,或这一行后面还有别的内容,都整批拒绝(`<file> needs a reason: end the block with a non-empty line '_Reason: <why this is changing>_'`)。该行被存成版本的 `reason`,`show` 与复盘读到的和 `plan change` 写的版本无法区分。原因必须是用户的话,不能替用户编。对**空的**计划文件 `create` 视为第一版,同样要带原因行。
 - `vision.md` / `anti-vision.md`:正文是新版本的内容,**不要自己写 `## 日期` 标题**(正文里出现以 `## ` 开头的行会被拒绝),CLI 加日期标题并追加。文件已存在时用 `append`;文件不存在时用 `create`,已存在却用 `create` 会被拒绝。
 - `goals.md`:正文必须按 `### Year Goal` / `### Month Project` / `### Daily Levers` / `### Constraints` 分节(未知小节被拒绝,小节外不能有文字);没写的小节沿用上一版。
 - 写入 `log/*.md` 的块里的判定与 `checkin` 同规则,违反则整批拒绝:新判定写成相邻两行 `- 判定: 在轨|轻微偏离|走偏` 与 `- 判定理由: <理由>`(判定值非法、缺理由或理由为空都拒绝);该日已有判定时,追加**不同**的判定会被拒绝(同一判定可再追加);改判必须写成带新事实的一行 `- 改判: <原判定> → <新判定> — 因 <新事实> 事实改判`(与 `revise-verdict` 写入的格式相同;原判定必须等于该日当前判定,新事实不能为空,该日还没有判定时无从改判)。

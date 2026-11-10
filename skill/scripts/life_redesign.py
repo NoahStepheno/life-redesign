@@ -1157,32 +1157,54 @@ def update_escalation(state):
                            or st["unrecorded"] >= ESCALATION_AT)
 
 
-def backfill_unrecorded(state):
+def pending_unrecorded(state):
+    """Read-only: (days that back-fill would mark unrecorded, new cursor), or
+    ([], None) when there is no cursor. The single source of the back-fill
+    rules: backfill_unrecorded writes exactly these days, and push planning
+    counts them in memory."""
     today = now().date()
     cursor = state.get("streak_cursor")
     if cursor is None:
-        return state
+        return [], None
     day = datetime.datetime.strptime(cursor, "%Y-%m-%d").date() + datetime.timedelta(days=1)
     verdicts = dict(log_verdicts())
+    days = []
     while day < today:
         d = day.isoformat()
-        has_checkin = verdicts.get(d) is not None
-        if d not in state["dnd_dates"] and not has_checkin:
-            header = "# %s\n" % d
-            existing = ""
-            if os.path.isfile(log_path(d)):
-                with open(log_path(d), encoding="utf-8") as f:
-                    existing = f.read()
-            if re.search(r"(?m)^# %s[ \t]*$" % re.escape(d), existing):
-                header = ""
-            append_log(d, "%s%s\n" % (header, UNRECORDED_LINE))
-            state["streak"]["unrecorded"] += 1
+        if d not in state["dnd_dates"] and verdicts.get(d) is None:
+            days.append(d)
         day += datetime.timedelta(days=1)
-    state["streak_cursor"] = max(
-        cursor, (today - datetime.timedelta(days=1)).isoformat())
+    return days, max(cursor, (today - datetime.timedelta(days=1)).isoformat())
+
+
+def backfill_unrecorded(state):
+    days, new_cursor = pending_unrecorded(state)
+    if new_cursor is None:
+        return state
+    for d in days:
+        header = "# %s\n" % d
+        existing = ""
+        if os.path.isfile(log_path(d)):
+            with open(log_path(d), encoding="utf-8") as f:
+                existing = f.read()
+        if re.search(r"(?m)^# %s[ \t]*$" % re.escape(d), existing):
+            header = ""
+        append_log(d, "%s%s\n" % (header, UNRECORDED_LINE))
+        state["streak"]["unrecorded"] += 1
+    state["streak_cursor"] = new_cursor
     update_escalation(state)
     save_state(state)
     return state
+
+
+def with_pending_unrecorded(state):
+    """A copy of `state` whose unrecorded count includes the days a back-fill
+    would add. Writes nothing; never save the copy."""
+    view = copy.deepcopy(state)
+    days, _cursor = pending_unrecorded(view)
+    view["streak"]["unrecorded"] += len(days)
+    update_escalation(view)
+    return view
 
 
 def streak_view(state):
@@ -1518,16 +1540,59 @@ def build_plan(state, date):
 
 
 def notify_state():
-    state = refresh(load_state())
+    """Persisted state for pushes. Read-only with respect to log/ and the
+    streak counters: pushes never back-fill (see with_pending_unrecorded)."""
+    return refresh(load_state())
+
+
+def push_view(state):
+    """State as the planner sees it: unrecorded days counted in memory."""
     if state["phase"] == "active":
-        state = backfill_unrecorded(state)
+        return with_pending_unrecorded(state)
     return state
+
+
+PUSH_LOG_NAME = "push.log"
+PUSH_LOG_MAX_BYTES = 64 * 1024
+PUSH_LOG_KEEP_LINES = 500
+
+
+def push_log_path():
+    return os.path.join(data_dir(), PUSH_LOG_NAME)
+
+
+def trim_push_log(path, max_bytes=PUSH_LOG_MAX_BYTES, keep=PUSH_LOG_KEEP_LINES):
+    """Size cap: over max_bytes, keep only the last `keep` lines."""
+    try:
+        if os.path.getsize(path) <= max_bytes:
+            return
+        with open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines(True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(lines[-keep:])
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def log_push(slot, outcome):
+    """One line per fire attempt: timestamp, slot, outcome. Only fixed words
+    and error text from this program; never user-authored text. Logging must
+    not break a push."""
+    line = "%s %s %s\n" % (now().strftime("%Y-%m-%dT%H:%M:%S"), slot, outcome)
+    try:
+        append_entry(push_log_path(), line, blank_line=False)
+        trim_push_log(push_log_path())
+    except OSError:
+        pass
 
 
 def cmd_notify_plan(args):
     state = notify_state()
+    view = push_view(state)
     date = check_date(args.date) if args.date else now().date().isoformat()
-    pushes, why = build_plan(state, date)
+    pushes, why = build_plan(view, date)
     for p in pushes:
         p["text"] = push_text(p["slot"], date, state, p.get("question"))
     out = {"date": date, "pushes": pushes}
@@ -1606,19 +1671,22 @@ def cfg_sent(state):
 
 def cmd_notify_fire(args):
     state = notify_state()
+    view = push_view(state)  # in-memory unrecorded count; `state` is what is saved
     now_dt = now()
     date = now_dt.date().isoformat()
-    pushes, why = build_plan(state, date)
+    pushes, why = build_plan(view, date)
     entry = next((p for p in pushes if p["slot"] == args.slot), None)
     result = {"slot": args.slot, "date": date, "dry_run": bool(args.dry_run),
               "fired": False}
     if entry is None:
         result["skipped"] = why or "not in today's plan"
+        log_push(args.slot, "skipped: " + result["skipped"])
         emit(result)
         return
     sent = cfg_sent(state)
     if args.tick and sent.get(args.slot) == date:
         result["skipped"] = "already sent today"
+        log_push(args.slot, "skipped: " + result["skipped"])
         emit(result)
         return
     if args.tick:
@@ -1626,6 +1694,7 @@ def cmd_notify_fire(args):
             date + " " + entry["time"], "%Y-%m-%d %H:%M")
         if not (0 <= (now_dt - at).total_seconds() < TICK_SECONDS):
             result["skipped"] = "not due yet"
+            log_push(args.slot, "skipped: " + result["skipped"])
             emit(result)
             return
     cfg = notify_config(state)
@@ -1633,7 +1702,7 @@ def cmd_notify_fire(args):
     source = "template"
     # AI only for the evening reminder, and only when notify.ai is on.
     if args.slot == "evening" and cfg["ai"]:
-        prompt = ai_prompt(state, date)
+        prompt = ai_prompt(view, date)
         try:
             cmd = client_command(cfg["client"], prompt)
         except (CliError, ValueError):
@@ -1655,6 +1724,12 @@ def cmd_notify_fire(args):
             save_state(state)
         except (OSError, subprocess.SubprocessError):
             result["error"] = "display command failed"
+    if result.get("error"):
+        log_push(args.slot, "failed: " + result["error"])
+    elif args.dry_run:
+        log_push(args.slot, "dry-run")
+    else:
+        log_push(args.slot, "sent")
     emit(result)
 
 
@@ -1692,6 +1767,8 @@ def launchd_jobs(state):
         argv = [sys.executable, script, "notify", "fire", slot]
         job = {"Label": LAUNCHD_PREFIX + slot,
                "EnvironmentVariables": env,
+               "StandardOutPath": push_log_path(),
+               "StandardErrorPath": push_log_path(),
                "RunAtLoad": False}
         if slot == "random":
             # launchd cannot fire at a random time: tick through the day and
@@ -1724,7 +1801,8 @@ def cmd_notify_launchd(args):
                  for j in jobs]
     else:
         shown = [{"label": j["label"], "path": j["path"]} for j in jobs]
-    out = {"dry_run": bool(args.dry_run), "jobs": shown, "commands": cmds}
+    out = {"dry_run": bool(args.dry_run), "jobs": shown, "commands": cmds,
+           "log_path": push_log_path()}
     if action == "uninstall":
         out["remove_files"] = [j["path"] for j in jobs]
     if args.dry_run:

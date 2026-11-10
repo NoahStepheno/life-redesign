@@ -351,6 +351,110 @@ class FireTest(NotifyTestCase):
         self.assertNotIn("OLDLOG", seen)
 
 
+class ReadOnlyPushTest(NotifyTestCase):
+    def snapshot(self):
+        logs = {}
+        folder = self.data_path("log")
+        for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+            logs[name] = self.read_data("log", name)
+        return logs, self.read_state()["streak"], self.read_state().get("streak_cursor")
+
+    def test_plan_and_fire_dry_run_write_nothing_to_log_or_streak(self):
+        before = self.snapshot()
+        self.set_now("2026-01-25T08:00:00")
+        p = self.plan("2026-01-25")
+        self.assertEqual([x["slot"] for x in p["pushes"]], ["evening"])  # silence
+        r = self.run_cli("notify", "fire", "evening", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_checkin_afterwards_still_backfills(self):
+        self.set_now("2026-01-25T08:00:00")
+        self.plan("2026-01-25")
+        r = self.run_cli("streak", "status")
+        self.assertEqual(r.json()["unrecorded"], 9)  # 16..24
+        self.assertEqual(len(self.snapshot()[0]), 9)
+
+    def test_dnd_days_skipped_in_memory_count(self):
+        self.run_cli("dnd", "add", "2026-01-16")
+        self.run_cli("dnd", "add", "2026-01-17")
+        self.set_now("2026-01-19T08:00:00")  # 16,17 DND; 18 unrecorded
+        self.assertEqual(len(self.plan("2026-01-19")["pushes"]), 3)
+        self.set_now("2026-01-21T08:00:00")  # 18,19,20 unrecorded
+        self.assertEqual([x["slot"] for x in self.plan("2026-01-21")["pushes"]],
+                         ["evening"])
+
+
+class PushLogTest(NotifyTestCase):
+    def push_log(self):
+        return self.read_data("push.log")
+
+    def test_install_dry_run_has_log_paths_under_data_dir(self):
+        out = self.run_cli("notify", "install", "--dry-run").json()
+        want = self.data_path("push.log")
+        self.assertEqual(out["log_path"], want)
+        for j in out["jobs"]:
+            plist = plistlib.loads(j["plist"].encode("utf-8"))
+            self.assertEqual(plist["StandardOutPath"], want)
+            self.assertEqual(plist["StandardErrorPath"], want)
+
+    def test_fire_logs_slot_time_and_outcome(self):
+        self.set_now("2026-01-16T21:30:00")
+        self.run_cli("notify", "fire", "evening", "--dry-run")
+        self.assertEqual(self.push_log(), "2026-01-16T21:30:00 evening dry-run\n")
+        self.run_cli("dnd", "add", "2026-01-16")
+        self.run_cli("notify", "fire", "morning")
+        self.assertIn("morning skipped: do-not-disturb date", self.push_log())
+
+    def test_log_never_contains_user_text_even_with_show_user_text(self):
+        self.run_cli("append", "goals", "--year-goal", "SECRETGOAL出版一本书",
+                     "--month-project", "m", "--constraints", "c")
+        self.run_cli("plan", "change", "daily-levers", "--text", "SECRETLEVER跑步",
+                     "--why", "r")
+        self.run_cli("notify", "config", "--show-user-text", "on")
+        self.set_now("2026-01-16T08:30:00")
+        out = self.run_cli("notify", "fire", "morning", "--dry-run").json()
+        self.assertIn("SECRETGOAL", out["text"])
+        log = self.push_log()
+        self.assertIn("morning", log)
+        self.assertNotIn("SECRET", log)
+
+    def test_failed_display_is_logged(self):
+        path = os.path.join(self._tmp, "bin")
+        os.makedirs(path)
+        tn = os.path.join(path, "terminal-notifier")
+        with open(tn, "w") as f:
+            f.write("#!/bin/sh\nexit 1\n")
+        os.chmod(tn, 0o755)
+        orig = self.env
+
+        def env(**kw):
+            e = orig(**kw)
+            e["PATH"] = path + os.pathsep + e.get("PATH", "")
+            return e
+        self.env = env
+        self.set_now("2026-01-16T21:30:00")
+        self.run_cli("notify", "fire", "evening")
+        self.assertIn("evening failed: display command failed", self.push_log())
+
+    def test_size_cap_keeps_only_last_lines(self):
+        old = "".join("2026-01-01T00:00:00 evening sent %d\n" % i
+                      for i in range(5000))
+        self.write_data(old, "push.log")
+        self.assertGreater(len(old.encode("utf-8")), 64 * 1024)
+        self.set_now("2026-01-16T21:30:00")
+        self.run_cli("notify", "fire", "evening", "--dry-run")
+        lines = self.push_log().splitlines()
+        self.assertEqual(len(lines), 500)
+        self.assertEqual(lines[-1], "2026-01-16T21:30:00 evening dry-run")
+        self.assertEqual(lines[-2], "2026-01-01T00:00:00 evening sent 4999")
+
+    def test_uninstall_dry_run_does_not_touch_log(self):
+        self.write_data("keep\n", "push.log")
+        self.run_cli("notify", "uninstall", "--dry-run")
+        self.assertEqual(self.push_log(), "keep\n")
+
+
 class TickTest(NotifyTestCase):
     def fake_display(self):
         """Put a fake terminal-notifier first on PATH that logs each call."""

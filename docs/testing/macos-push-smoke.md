@@ -11,7 +11,7 @@
 安全路径,按顺序:
 
 1. **先只跑 `--dry-run`**(第 3 节)。`install --dry-run` 和 `uninstall --dry-run` 只打印将要写的 plist 与将要执行的 `launchctl` 命令,不碰系统。
-2. **用一次性数据目录**(`LIFE_REDESIGN_HOME`,第 2 节),不要拿真实的 `~/.life-redesign` 做注入时间的试验。原因:注入未来日期后,CLI 会在数据目录里为"过去没打卡的日子"补写 `- 未记录` 日志并增加 Unrecorded 计数(`notify plan` 和 `notify fire --dry-run` 也会这样,见 5.2 的说明)。这些写入在真实数据上很难手工撤销。
+2. **用一次性数据目录**(`LIFE_REDESIGN_HOME`,第 2 节),不要拿真实的 `~/.life-redesign` 做注入时间的试验。原因:注入未来日期后,`checkin`、`streak status` 等交互会在数据目录里为"过去没打卡的日子"补写 `- 未记录` 日志并增加 Unrecorded 计数(`notify plan` / `notify fire` 不会,见 5.2)。这些写入在真实数据上很难手工撤销。
 3. **如果非要用真实数据目录**:先备份(2.3),并读完 11.3 的回滚。
 4. **三个任务的标签固定**(`com.life-redesign.notify.morning|random|evening`),每个用户同一时间只能有一套。即使用了一次性数据目录,`install` 仍写进**真实的** `~/Library/LaunchAgents/`,并且**会覆盖已有的同名任务**(它们的 plist 里 `LIFE_REDESIGN_HOME` 会指向一次性目录)。如果你已经安装过正式版,测完请按第 10 节卸载、再对真实数据目录重新 `install`。
 5. 出任何问题,直接跳到 11.2(手动清理)。
@@ -116,7 +116,7 @@ lr notify install --dry-run
 | morning | `StartCalendarInterval` Hour 8 / Minute 30;参数 `notify fire morning` | 一致 |
 | random | `StartInterval` 900;参数 `notify fire random --tick`;无 `StartCalendarInterval` | 一致 |
 | evening | `StartCalendarInterval` Hour 21 / Minute 30;参数 `notify fire evening` | 一致 |
-| 全部 | `RunAtLoad` false;`EnvironmentVariables` 含 `HOME`、`LIFE_REDESIGN_HOME`、`PATH` | 一致 |
+| 全部 | `RunAtLoad` false;`EnvironmentVariables` 含 `HOME`、`LIFE_REDESIGN_HOME`、`PATH`;`StandardOutPath` 与 `StandardErrorPath` 都是 `<数据目录>/push.log`(`install --dry-run` 另有顶层 `log_path`) | 一致 |
 
 检查清单(你来勾):
 
@@ -172,9 +172,9 @@ lr notify uninstall --dry-run
 f() { echo "## $LIFE_REDESIGN_NOW $*"; lr notify fire "$@"; }
 ```
 
-### 5.2 先读这个副作用
+### 5.2 先读这个:推送命令只读,但会写 push.log
 
-`notify plan` 与 `notify fire --dry-run` 都会先做"补记 Unrecorded"(代码里的 `notify_state()`):当注入的日期晚于上次互动,会往 `log/` 里**追加** `- 未记录` 并增加 `streak.unrecorded`。这是 5.7 沉默场景能成立的原因,但也说明它们**不是纯只读**。所以第 5 节只在一次性数据目录里做,并且**按下面的顺序**(时间只往前推)。
+`notify plan` 与 `notify fire` 不会补记 Unrecorded:它们在内存里按同样的规则数出未记录天数(用于沉默期判断),**不往 `log/` 写任何东西,也不改 `streak.unrecorded`**。真正的补记只发生在你做 `checkin`、`streak status`、快照这类交互时(5.7 末尾的 `streak status` 就会补记)。`notify fire` 会在数据目录的 `push.log` 追加一行结果(时段、时间、结果,不含用户原文),`--dry-run` 也会记;真发成功时还会更新 `state.json` 的 `notify.sent`。仍然建议第 5 节在一次性数据目录里做,时间只往前推。
 
 ### 5.3 早晨(2026-01-16)
 
@@ -237,13 +237,27 @@ f morning --dry-run
 lr notify plan --date 2026-01-17
 clock 2026-01-20T08:30:00
 lr notify plan
+ls "$LIFE_REDESIGN_HOME/log"
 f morning --dry-run
 clock 2026-01-20T21:30:00
 f evening --dry-run
 lr streak status
+ls "$LIFE_REDESIGN_HOME/log"
 ```
 
-**[已在无真实通知的环境验证]** 预期:勿扰日 `skipped: "do-not-disturb date"`,计划 `pushes: []`、`reason: "do-not-disturb date"`。到 2026-01-20,16、18、19 三天没打卡(17 日是勿扰日,不计)→ `streak.unrecorded` 为 3,计划只剩晚间一条,`reason: "silence: unrecorded streak"`;早晨 `fire` 被跳过(`skipped: "silence: unrecorded streak"`),晚间照常给出内容。
+**[已在无真实通知的环境验证]** 预期:勿扰日 `skipped: "do-not-disturb date"`,计划 `pushes: []`、`reason: "do-not-disturb date"`。到 2026-01-20,16、18、19 三天没打卡(17 日是勿扰日,不计)→ 计划只剩晚间一条,`reason: "silence: unrecorded streak"`;早晨 `fire` 被跳过(`skipped: "silence: unrecorded streak"`),晚间照常给出内容。此时 `ls "$LIFE_REDESIGN_HOME/log"` 还是空的、没有任何补记(推送只读);之后 `lr streak status` 才补记,输出 `unrecorded` 为 3,`log/` 里多出 2026-01-16、18、19 三个文件。
+
+看推送日志(实测内容):
+
+```sh
+cat "$LIFE_REDESIGN_HOME/push.log"
+```
+
+```output
+2026-01-17T08:30:00 morning skipped: do-not-disturb date
+2026-01-20T08:30:00 morning skipped: silence: unrecorded streak
+2026-01-20T21:30:00 evening dry-run
+```
 
 ### 5.8 协议未完成
 
@@ -463,7 +477,7 @@ ls -A "$LIFE_REDESIGN_HOME"
 ls -A "$LIFE_REDESIGN_HOME/log"
 ```
 
-预期只有 `anti-vision.md`、`goals.md`、`log`、`protocol`、`state.json`、`vision.md`(以及你自己建的文件)。`log/` 里除你的日志外,可能有 5.2 所述的 `- 未记录` 补记。`state.json` 里的 `notify.sent` 会保留(它是"最后一次发送日期",不是任务)。
+预期只有 `anti-vision.md`、`goals.md`、`log`、`protocol`、`state.json`、`vision.md`、`push.log`(以及你自己建的文件)。`push.log` 是用户数据,**卸载不会删除**,要清理自己删。`log/` 里除你的日志外,可能有你做 `streak status` / `checkin` 时补记的 `- 未记录`(推送本身不会补记)。`state.json` 里的 `notify.sent` 会保留(它是"最后一次发送日期",不是任务)。
 
 已知行为:如果任务本来就没装,`uninstall` 的三条 `bootout` 会失败,命令以非零状态退出——但它仍然会删除 plist 文件。这是无害的。
 
@@ -472,6 +486,14 @@ ls -A "$LIFE_REDESIGN_HOME/log"
 ## 11. 出问题时:排查与手动清理
 
 ### 11.1 排查:任务加载了但不弹
+
+先看推送日志。每个 launchd 任务的标准输出和错误都写到 `<数据目录>/push.log`(`install --dry-run` 的 `log_path` 和每个 plist 的 `StandardOutPath` / `StandardErrorPath` 都是它):
+
+```sh
+tail -n 50 "$LIFE_REDESIGN_HOME/push.log"
+```
+
+每次 `notify fire` 一行:`<时间> <时段> <结果>`,结果是 `sent`、`dry-run`、`skipped: <原因>` 或 `failed: <错误>`;从不含你写的任何文字(即使开了显示原文)。Python 启动失败等 launchd 层面的报错 traceback 也会落在这个文件里。文件超过 64 KB 时只保留最后 500 行;要清理直接 `rm "$LIFE_REDESIGN_HOME/push.log"`。该时段在预期时间没有对应行,说明任务根本没被 launchd 启动。
 
 按顺序:
 

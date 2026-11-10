@@ -439,6 +439,8 @@ LR checkin record \
 
 无文件、无 shell 的客户端。与 CLI 的对应:快照 = `snapshot`,更新块 = `apply-block`。这两条命令由用户(或该用户机器上有 shell 的 agent)在本机运行;聊天里的你只产出文本。
 
+**B 档提示词包**:用户在聊天开头粘贴 [prompts/system-prompt.md](./prompts/system-prompt.md)(行为准则 + 与下文一致的更新块写法);用户端的操作步骤、实测的合法/非法块、快照的局限和没有命令行时的手工退路见 [prompts/README.md](./prompts/README.md)。本节是规则的来源,提示词包若与本节不一致,以本节和 CLI 的实际行为为准。
+
 1. 用户开聊前运行 `LR snapshot` 并把输出的 JSON **状态快照**粘贴给你。字段:`generated`、`vision`、`anti_vision`、`goals`(`Year Goal` / `Month Project` / `Daily Levers` / `Constraints` 各小节的当前文字)、`verdicts`(近 7 天的 `{date, verdict}`)、`streak`(`drift` / `unrecorded` / `escalation`)。
 2. 你按本协议的行为准则与对应入口流程执行。B 档没有 CLI 的门禁,检查前置条件由你负责(`phase` 不在快照里;如果用户从没跑过一天协议,先引导他在有 CLI 的环境里完成)。
 3. 对话结束时,输出**更新块**,用户保存为文件后运行 `LR apply-block --file update.txt`(或从标准输入传入)。格式:

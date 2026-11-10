@@ -405,7 +405,7 @@ agent: 判定:走偏。理由:三个杠杆基本未完成(约 50 字、散步没
 
 ## 4. 纯聊天 App(C 档)
 
-C 档没有 shell。用户在本机运行 `lr snapshot` 并把 JSON 粘贴到聊天里;聊天结束时让 agent 产出更新块,保存为文件后 `lr apply-block --file update.txt`。**C 档不做一天协议**(协议答案是 `protocol/` 文件,靠 CLI 的逐题门禁),用户须先在 A / B 档里完成协议。
+C 档没有 shell。**开聊前先把 `skill/prompts/system-prompt.md` 的全文粘贴给聊天 App**(用户端步骤见 `skill/prompts/README.md`)。用户在本机运行 `lr snapshot` 并把 JSON 粘贴到聊天里;聊天结束时让 agent 产出更新块,保存为文件后 `lr apply-block --file update.txt`。**C 档不做一天协议**(协议答案是 `protocol/` 文件,靠 CLI 的逐题门禁),用户须先在 A / B 档里完成协议。
 
 ### 4.1 C 档可跑的行为
 
@@ -424,7 +424,7 @@ C 档没有 shell。用户在本机运行 `lr snapshot` 并把 JSON 粘贴到聊
   lr snapshot
   ```
 
-  把输出整段粘给聊天 App。**今天**的日志还不存在(S6 的最后一次打卡是昨天)。
+  把输出整段粘给聊天 App(此前已粘贴 `skill/prompts/system-prompt.md`)。**今天**的日志还不存在(S6 的最后一次打卡是昨天)。
 - 触发 a(生成合法块):对 C 档 agent 说:`今天打卡:早上写了 300 字,散步没去,没改稿,晚上在刷手机,我承认又在躲。请给我更新块。`
 - 通过 a:agent 先审问(同 T8),然后产出**一个**合法块,例如:
 
@@ -508,7 +508,7 @@ rm -rf /tmp/lr-trial-project
 4. **挖掘无波澜的时点**(T6)。5.2 说"完成 1.1–1.11 后"若无波澜不要继续。但 1.11 要先被回答并落盘(CLI 逐题门禁),协议没说是否可以先记录 1.11 再追问;也没说追问之后是重答已落盘的题(CLI 不允许重答同一题,只能新增补充,无处记录)还是只在对话里继续。
 5. **(已修复,#22)B 档的更新块曾可以绕开 `plan change` 的"必须有原因"**。现在向 `vision.md` / `anti-vision.md` / `goals.md` 追加(或对空文件新建)的块必须以一行非空的 `_Reason: <原因>_` 结尾,缺少或为空整批拒绝;原因被存成版本的 `reason`,`show` 和月复盘的 `plan_changes` 都能读到。仍需人工确认的是 C 档 agent 会不会替用户编一个原因来过关(见 T17 触发 c 的第 6 条)。
 6. **危机门槛没有定义**(T15)。"严重抑郁迹象"的边界靠模型判断;CLI 不会也不能检查。
-7. **CLAUDE.md 提到 `skill/prompts/`,PROTOCOL 提到 B 档提示词包,但仓库里 `skill/` 下没有 `prompts/` 目录**(当前只有 `AGENTS.md`、`PROTOCOL.md`、`SKILL.md`、`scripts/`)。C 档用户目前没有现成的"开聊提示词",第 4 节只能假设用户自己写一句"请先读 PROTOCOL"。需要决定 #13 是否应交付它,否则 C 档的试用只能手工贴 PROTOCOL。
+7. **(已解决,#23)`skill/prompts/` 现已存在**:`skill/prompts/system-prompt.md` 是 C 档用户在聊天开头整段粘贴的提示词包,`skill/prompts/README.md` 是用户端说明(怎么粘贴快照、保存并用 `apply-block` 应用更新块、没有命令行时的手工退路,以及已实测的合法/非法块和真实错误信息)。C 档试用时先粘贴 `system-prompt.md`,再粘贴快照。仍需人工确认的是各聊天 App 是否真的遵守提示词(尤其是拒绝非法块、不替用户编原因)。
 8. **C 档看不到 `phase`**。快照没有 `phase`,PROTOCOL 10 要求 agent 自己确认协议已完成;快照里 `vision` 为 `null` 可以作为间接信号,但这是推断。
 9. **快照的 `verdicts` 只含近 7 天**,而 Escalation 的"连续走偏"可以更长;agent 在 C 档不能靠自己数日志验证 `streak.drift`,只能信快照里的 `streak`。
 10. **"不要设置 `LIFE_REDESIGN_NOW`"与试用的时间控制**。试用必须靠 `LIFE_REDESIGN_NOW` 制造"几天前"的状态,所以本清单把所有时间都相对真实今天,并保证起点函数结束后该变量已 `unset`。如果你在启动 agent 的终端里手动留着它,agent 的行为不再贴近真实使用。
